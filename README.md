@@ -90,8 +90,20 @@ full screen with no browser chrome, and downloads use the system *Save to Files*
 picker.
 
 **Android (Chrome)**
-Open the URL, then the browser menu → **Install app** (or **Add to Home
-screen**).
+Open the URL. Either use the browser menu → **Install app** (or **Add to Home
+screen**), or open the app's own menu (☰) → **Install app**.
+
+That second option exists because Chrome decides for itself whether to show an
+install banner, and often shows nothing at all. The app listens for the same
+`beforeinstallprompt` event and only reveals the menu item once Chrome has
+confirmed the app meets its install criteria, so its presence means it will
+work. There is deliberately no such button on iOS: Safari has no programmatic
+install, so the Share route is the only one.
+
+Note that installation requires **HTTPS**. If you are reaching the server over
+plain HTTP (a `http://100.x.y.z:8080` address, say), Chrome will refuse to
+install it. `tailscale serve` or a domain with Caddy gives you a real
+certificate.
 
 Either way, once installed it works offline for browsing the shell, and updates
 itself the next time it has a connection.

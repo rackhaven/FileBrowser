@@ -1042,6 +1042,53 @@ async function onPasswordChange(e) {
   }
 }
 
+// ---------------------------------------------------------------- install ---
+
+// Android Chrome decides on its own whether to show its install banner, and
+// frequently shows nothing at all. Rather than leave people hunting through
+// the browser menu, capture the event and offer a button of our own. The
+// event only fires once the browser is satisfied the app meets its install
+// criteria, so showing the item is itself the signal.
+let installPrompt = null;
+
+function wireInstall() {
+  const item = $('mi-install');
+
+  // Already running as an installed app: nothing to offer.
+  if (window.matchMedia('(display-mode: standalone)').matches) return;
+
+  window.addEventListener('beforeinstallprompt', (event) => {
+    event.preventDefault(); // suppress Chrome's own banner
+    installPrompt = event;
+    item.hidden = false;
+  });
+
+  window.addEventListener('appinstalled', () => {
+    installPrompt = null;
+    item.hidden = true;
+    toast('Installed');
+  });
+
+  item.addEventListener('click', async () => {
+    closePanels();
+
+    if (!installPrompt) {
+      // Either iOS, which never fires this event, or the criteria are not met.
+      const ios = /iP(hone|ad|od)/.test(navigator.userAgent);
+      toast(ios
+        ? 'On iPhone: tap the Share button, then Add to Home Screen'
+        : 'Use your browser menu and choose Install app or Add to Home screen');
+      return;
+    }
+
+    installPrompt.prompt();
+    const choice = await installPrompt.userChoice;
+    installPrompt = null;
+    item.hidden = true;
+    if (choice.outcome === 'accepted') toast('Installing…');
+  });
+}
+
 // Service worker keeps the shell available offline, which matters on a phone
 // on patchy mobile data. API traffic is never cached: file listings are
 // private and must not be stale.
@@ -1054,6 +1101,7 @@ if ('serviceWorker' in navigator) {
 }
 
 wire();
+wireInstall();
 boot();
 
 // Exposed for debugging from a remote browser console.
