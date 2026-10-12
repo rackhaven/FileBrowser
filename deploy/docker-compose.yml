@@ -1,0 +1,67 @@
+# Docker Compose deployment.
+#
+#   cp deploy/.env.example .env     # then edit the passwords
+#   docker compose up -d
+#
+# Put your files in ./data/files (or point ROOT at an existing share such as
+# /mnt/nas) and browse to http://<server>:8080.
+
+services:
+  filebrowser:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        # Shown in /api/status and the menu footer.
+        VERSION: ${FB_VERSION:-dev}
+    image: filebrowser:latest
+    container_name: filebrowser
+    restart: unless-stopped
+
+    # Publish to the host. When using a reverse proxy or a VPN, bind to
+    # 127.0.0.1 instead so the service is not exposed directly.
+    ports:
+      - "${FB_BIND:-0.0.0.0}:${FB_PORT:-8080}:8080"
+
+    environment:
+      FB_ROOT: /srv/files
+      FB_DATA_DIR: /data
+      FB_LOG_LEVEL: ${FB_LOG_LEVEL:-info}
+
+      # Only used the very first time, when no accounts exist yet. After that
+      # the database in /data is the source of truth.
+      FB_ADMIN_USER: ${FB_ADMIN_USER:-admin}
+      FB_ADMIN_PASSWORD: ${FB_ADMIN_PASSWORD:?set FB_ADMIN_PASSWORD in .env}
+
+      # Set to true ONLY when a reverse proxy you control terminates TLS, so
+      # the session cookie gets the Secure attribute.
+      FB_TRUST_PROXY_HEADERS: ${FB_TRUST_PROXY_HEADERS:-false}
+
+    volumes:
+      - ${FB_ROOT:-../data/files}:/srv/files
+      - fb-data:/data
+
+    # The server writes only inside these paths.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  fb-data:

@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<title>Files</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Private file browser">
+<meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="color-scheme" content="light dark">
+
+<!-- Installability: a manifest plus a fetch handler is all iOS needs to allow
+     "Add to Home Screen" with a standalone display. -->
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/static/icon-192.png" sizes="192x192" type="image/png">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Files">
+
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+<!-- ---------------------------------------------------------------- shell -->
+<div id="app" hidden>
+
+  <header class="topbar">
+    <button class="icon-btn" id="btn-menu" aria-label="Menu" aria-haspopup="true">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+    </button>
+
+    <!-- Breadcrumb doubles as the home button: tapping any ancestor jumps there. -->
+    <nav class="crumbs" id="crumbs" aria-label="Breadcrumb"></nav>
+
+    <button class="icon-btn" id="btn-search" aria-label="Search">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+    </button>
+  </header>
+
+  <main id="main" tabindex="-1">
+    <div id="list" class="list" role="list"></div>
+    <p id="empty" class="empty" hidden>This folder is empty.</p>
+  </main>
+
+  <footer class="statusbar">
+    <span id="status-count"></span>
+    <span id="status-quota" class="muted"></span>
+  </footer>
+
+  <!-- Floating action button: only shown when the folder is writable. -->
+  <button class="fab" id="btn-fab" hidden aria-label="Add">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+  </button>
+</div>
+
+<!-- --------------------------------------------------------------- signin -->
+<div id="login" class="centered" hidden>
+  <form id="login-form" class="card" autocomplete="on">
+    <h1 class="brand">Files</h1>
+    <p class="muted" id="login-sub">Sign in to continue</p>
+
+    <label class="field">
+      <span>Username</span>
+      <input id="login-user" name="username" type="text" autocomplete="username"
+             autocapitalize="none" autocorrect="off" spellcheck="false" required>
+    </label>
+
+    <label class="field">
+      <span>Password</span>
+      <input id="login-pass" name="password" type="password" autocomplete="current-password" required>
+    </label>
+
+    <p class="error" id="login-error" role="alert" hidden></p>
+    <button class="primary" id="login-submit" type="submit">Sign in</button>
+  </form>
+</div>
+
+<!-- ------------------------------------------------------------ bootstrap -->
+<div id="bootstrap" class="centered" hidden>
+  <form id="bootstrap-form" class="card" autocomplete="off">
+    <h1 class="brand">Set up</h1>
+    <p class="muted">No accounts exist yet. Create the first administrator.</p>
+
+    <label class="field">
+      <span>Username</span>
+      <input id="boot-user" type="text" autocapitalize="none" autocorrect="off"
+             spellcheck="false" required>
+    </label>
+
+    <label class="field">
+      <span>Password</span>
+      <input id="boot-pass" type="password" autocomplete="new-password" required>
+    </label>
+
+    <p class="hint">At least 8 characters.</p>
+    <p class="error" id="boot-error" role="alert" hidden></p>
+    <button class="primary" type="submit">Create administrator</button>
+  </form>
+</div>
+
+<!-- ----------------------------------------------------------- change pw -->
+<div id="pwchange" class="centered" hidden>
+  <form id="pw-form" class="card" autocomplete="off">
+    <h1 class="brand">Choose a password</h1>
+    <p class="muted">An administrator set this for you. Pick something only you know.</p>
+
+    <label class="field">
+      <span>Current password</span>
+      <input id="pw-cur" type="password" autocomplete="current-password" required>
+    </label>
+    <label class="field">
+      <span>New password</span>
+      <input id="pw-new" type="password" autocomplete="new-password" required>
+    </label>
+    <label class="field">
+      <span>Confirm new password</span>
+      <input id="pw-confirm" type="password" autocomplete="new-password" required>
+    </label>
+
+    <p class="error" id="pw-error" role="alert" hidden></p>
+    <button class="primary" type="submit">Save and continue</button>
+  </form>
+</div>
+
+<!-- -------------------------------------------------------------- drawers -->
+<div class="scrim" id="scrim" hidden></div>
+
+<aside id="menu" class="drawer" hidden aria-label="Menu">
+  <div class="drawer-head">
+    <strong id="menu-user"></strong>
+    <button class="icon-btn" id="menu-close" aria-label="Close menu">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div class="drawer-body">
+    <button class="drawer-item" id="mi-up" hidden>Go up one folder</button>
+    <button class="drawer-item" id="mi-mkdir" hidden>New folder</button>
+    <button class="drawer-item" id="mi-pw">Change my password</button>
+    <button class="drawer-item" id="mi-theme">Theme: <span id="theme-label">auto</span></button>
+    <button class="drawer-item admin-only" id="mi-users" hidden>Manage users</button>
+    <button class="drawer-item danger" id="mi-logout">Sign out</button>
+  </div>
+  <p class="muted drawer-foot">
+    <span id="menu-version"></span>
+    <!-- Required by the AGPL: users reaching this over the network are
+         offered the corresponding source. -->
+    <a id="source-link" href="https://github.com/rackhaven/FileBrowser" target="_blank" rel="noopener noreferrer">source code</a>
+  </p>
+</aside>
+
+<aside id="admin" class="drawer wide" hidden aria-label="Manage users">
+  <div class="drawer-head">
+    <strong>Users</strong>
+    <button class="icon-btn" id="admin-close" aria-label="Close">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div class="drawer-body">
+    <div id="user-list" class="users"></div>
+    <button class="primary block" id="mi-adduser">Add user</button>
+  </div>
+</aside>
+
+<aside id="searchpane" class="drawer" hidden aria-label="Search">
+  <div class="drawer-head">
+    <input id="search-input" class="search" type="search" placeholder="Search this folder"
+           autocomplete="off" autocapitalize="none" spellcheck="false">
+    <button class="icon-btn" id="search-close" aria-label="Close">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div class="drawer-body"><div id="search-results" class="list"></div></div>
+</aside>
+
+<!-- --------------------------------------------------------------- sheets -->
+<dialog id="sheet" class="sheet">
+  <form method="dialog" class="sheet-body">
+    <h2 id="sheet-title"></h2>
+    <p class="muted" id="sheet-text"></p>
+    <label class="field" id="sheet-field">
+      <span id="sheet-label"></span>
+      <input id="sheet-input" type="text" autocomplete="off" autocapitalize="none" spellcheck="false">
+      <textarea id="sheet-area" rows="6" autocomplete="off" autocapitalize="none" spellcheck="false" hidden></textarea>
+    </label>
+    <p class="error" id="sheet-error" role="alert" hidden></p>
+    <menu>
+      <button class="ghost" value="cancel" type="submit">Cancel</button>
+      <button class="primary" id="sheet-ok" value="ok" type="submit">OK</button>
+    </menu>
+  </form>
+</dialog>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+
+<!-- Detail sheet actions -->
+<div id="detail" class="sheet detail" hidden>
+  <div class="sheet-body">
+    <h2 id="detail-name"></h2>
+    <p class="muted" id="detail-meta"></p>
+    <menu>
+      <button class="ghost" id="d-download">Download</button>
+      <button class="ghost" id="d-rename">Rename</button>
+      <button class="ghost danger" id="d-delete">Delete</button>
+      <button class="ghost" id="d-cancel">Close</button>
+    </menu>
+  </div>
+</div>
+
+<script src="/static/app.js" type="module"></script>
+</body>
+</html>

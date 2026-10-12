@@ -1,0 +1,41 @@
+# Keep line endings as LF everywhere, in the repository and in working copies.
+#
+# Without this, a Windows checkout with core.autocrlf=true would commit CRLF
+# into Go sources, the systemd unit and the shell-heavy config files. That
+# breaks `go vet`, shebang scripts and the Dockerfile on Linux, and it shows up
+# as a whole-repository diff the first time someone clones on another OS.
+
+* text=auto eol=lf
+
+# Code and config: explicitly LF.
+*.go     text eol=lf
+*.js     text eol=lf
+*.mjs    text eol=lf
+*.json   text eol=lf
+*.webmanifest text eol=lf
+*.css    text eol=lf
+*.html   text eol=lf
+*.md     text eol=lf
+*.yaml   text eol=lf
+*.yml    text eol=lf
+*.toml   text eol=lf
+
+# Files with no extension that are still text.
+Dockerfile      text eol=lf
+Makefile        text eol=lf
+Caddyfile       text eol=lf
+LICENSE         text eol=lf
+.gitignore      text eol=lf
+.dockerignore   text eol=lf
+*.service       text eol=lf
+*.example       text eol=lf
+.env.example    text eol=lf
+
+# Never touch binaries.
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.woff    binary
+*.woff2   binary

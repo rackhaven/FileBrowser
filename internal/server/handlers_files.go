@@ -1,0 +1,345 @@
+// Copyright (C) 2026 the Files authors
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+package server
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"mime"
+	"net/http"
+	"os"
+	"path"
+	"strconv"
+	"strings"
+
+	"github.com/lennox/filebrowser/internal/auth"
+	"github.com/lennox/filebrowser/internal/fs"
+)
+
+// writeFSError maps filesystem errors onto HTTP responses. Callers get a
+// consistent shape and never learn the real path on disk.
+func (s *Server) writeFSError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, fs.ErrForbidden):
+		writeError(w, http.StatusForbidden, "you do not have access to this folder")
+	case errors.Is(err, fs.ErrNotExist):
+		writeError(w, http.StatusNotFound, "not found")
+	case errors.Is(err, fs.ErrNotDir):
+		writeError(w, http.StatusBadRequest, "expected a file")
+	case errors.Is(err, os.ErrNotExist):
+		writeError(w, http.StatusNotFound, "not found")
+	case errors.Is(err, os.ErrPermission):
+		writeError(w, http.StatusForbidden, "permission denied by the operating system")
+	case errors.Is(err, os.ErrExist):
+		writeError(w, http.StatusConflict, "an item with that name already exists")
+	default:
+		s.logError("filesystem error", "path", r.URL.Query().Get("path"), "err", err)
+		writeError(w, http.StatusInternalServerError, "could not complete the request")
+	}
+}
+
+// handleList returns the entries of a directory.
+func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	vpath := r.URL.Query().Get("path")
+
+	entries, err := s.files.List(u, vpath)
+	if err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"path":      fs.Clean(vpath),
+		"parent":    parentOf(fs.Clean(vpath), u),
+		"entries":   entries,
+		"can_write": u.EffectiveLevel(fs.Clean(vpath)) >= auth.AccessWrite,
+	})
+}
+
+// parentOf returns the path to navigate up to, or "" at a boundary the user
+// may not leave.
+func parentOf(p string, u *auth.User) string {
+	if p == "/" {
+		return ""
+	}
+	parent := path.Dir(p)
+	if parent == "." {
+		parent = "/"
+	}
+	if u.Admin {
+		return parent
+	}
+	// Do not offer "up" past the root of the user's grants, otherwise they
+	// tap into an empty folder with no way back.
+	if u.HasAnyGrantUnder(parent) || u.EffectiveLevel(parent) >= auth.AccessRead {
+		return parent
+	}
+	return ""
+}
+
+// handleInfo describes a single entry.
+func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	entry, err := s.files.Info(u, r.URL.Query().Get("path"))
+	if err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, entry)
+}
+
+// handleDownload streams a file.
+//
+// http.ServeContent handles Range, If-Modified-Since and partial responses, so
+// resuming an interrupted large download works, and the mobile browser gets a
+// correct Content-Length rather than an unbounded chunked body.
+func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	vpath := r.URL.Query().Get("path")
+
+	file, info, err := s.files.Open(u, vpath)
+	if err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+	defer file.Close()
+
+	entry, err := s.files.Info(u, vpath)
+	if err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", detectContentType(info.Name()))
+	w.Header().Set("Content-Disposition", contentDisposition(entry.Name, r.URL.Query().Get("inline") == "1"))
+	w.Header().Set("Accept-Ranges", "bytes")
+	// Private: a shared proxy must not cache someone's files.
+	w.Header().Set("Cache-Control", "private, max-age=0, must-revalidate")
+
+	// HEAD must not send a body.
+	if r.Method == http.MethodHead {
+		w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	s.logf("download", "user", u.Username, "file", entry.Name, "bytes", info.Size())
+	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
+}
+
+// contentDisposition builds the header. The filename is passed both as ASCII
+// (for old clients) and RFC 5987 UTF-8 (for everything current), and is
+// quoted because it is attacker-influenced file content.
+func contentDisposition(name string, inline bool) string {
+	ascii := strings.Map(func(r rune) rune {
+		if r < 32 || r > 126 || r == '"' || r == '\\' {
+			return '_'
+		}
+		return r
+	}, name)
+
+	kind := "attachment"
+	if inline {
+		kind = "inline"
+	}
+	return fmt.Sprintf(`%s; filename="%s"; filename*=UTF-8''%s`, kind, ascii, urlEscape(name))
+}
+
+// urlEscape percent-encodes for the RFC 5987 filename* parameter.
+func urlEscape(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '-', c == '_', c == '.', c == '~':
+			b.WriteByte(c)
+		default:
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
+}
+
+// detectContentType prefers a type derived from the extension, falling back to
+// sniffing. It never returns anything executable-inline for unknown types.
+func detectContentType(name string) string {
+	ext := strings.ToLower(path.Ext(name))
+	if ct := mime.TypeByExtension(ext); ct != "" {
+		return ct
+	}
+	// An extension-less file is usually text (configs, logs, scripts).
+	if ext == "" {
+		return "text/plain; charset=utf-8"
+	}
+	return "application/octet-stream"
+}
+
+// handleUpload receives a file body.
+//
+// The body is streamed straight to disk rather than buffered in memory, so a
+// multi-gigabyte file uses constant RAM. Uploads land in a temp file first and
+// are renamed into place, so an interrupted upload never leaves a truncated
+// file that looks complete.
+func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	q := r.URL.Query()
+	name := q.Get("name")
+
+	target, vpath, err := s.files.UploadTarget(u, q.Get("path"), name)
+	if err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+
+	tmp, err := os.CreateTemp(pathOfDir(target), ".upload-*")
+	if err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+	tmpName := tmp.Name()
+	// Any failure past this point must remove the temp file.
+	defer os.Remove(tmpName) // no-op once the rename succeeds
+
+	// Cap the body so a hostile client cannot fill the disk. The limit is set
+	// generously; raise it in config if you need bigger files.
+	const maxUpload = 32 << 30 // 32 GiB
+	written, err := io.Copy(tmp, http.MaxBytesReader(w, r.Body, maxUpload))
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "file is too large")
+			return
+		}
+		s.logError("upload failed", "path", vpath, "err", err)
+		writeError(w, http.StatusInternalServerError, "upload failed")
+		return
+	}
+
+	// Preserve the executable bit for things like .sh and binaries uploaded
+	// from a phone, but do not honour the wider mode.
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		s.logError("chmod upload", "err", err)
+	}
+	if err := os.Rename(tmpName, target); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			// Rename will not clobber on Windows; remove first so replacing a
+			// file works the same on every platform.
+			if rerr := os.Remove(target); rerr == nil {
+				err = os.Rename(tmpName, target)
+			}
+		}
+		if err != nil {
+			s.writeFSError(w, r, err)
+			return
+		}
+	}
+
+	s.logf("upload", "user", u.Username, "file", name, "bytes", written)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"path": vpath,
+		"name": name,
+		"size": written,
+	})
+}
+
+func pathOfDir(p string) string {
+	if i := strings.LastIndexAny(p, `/\`); i > 0 {
+		return p[:i]
+	}
+	return "."
+}
+
+type mkdirRequest struct {
+	Path string `json:"path"`
+	Name string `json:"name"`
+}
+
+// handleMkdir creates a directory.
+func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	var req mkdirRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	entry, err := s.files.Mkdir(u, req.Path, strings.TrimSpace(req.Name))
+	if err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, entry)
+}
+
+// handleDelete removes a file or folder.
+func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	vpath := r.URL.Query().Get("path")
+	if err := s.files.Remove(u, vpath); err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+	s.logf("delete", "user", u.Username, "path", vpath)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+type renameRequest struct {
+	From    string `json:"from"`
+	ToDir   string `json:"to_dir"`
+	NewName string `json:"new_name"`
+}
+
+// handleRename moves or renames an entry.
+func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	var req renameRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	entry, err := s.files.Rename(u, req.From, req.ToDir, strings.TrimSpace(req.NewName))
+	if err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, entry)
+}
+
+// handleUsage returns storage totals for a folder, shown on the dashboard.
+func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	depth, _ := strconv.Atoi(r.URL.Query().Get("depth"))
+	if depth <= 0 || depth > 16 {
+		depth = 8
+	}
+	usage, err := s.files.Usage(u, r.URL.Query().Get("path"), depth)
+	if err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, usage)
+}
+
+// handleHealth is for uptime checks and the Docker HEALTHCHECK.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintln(w, "ok")
+}

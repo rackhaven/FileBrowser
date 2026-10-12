@@ -1,0 +1,25 @@
+# Build artifacts
+/filebrowser
+/filebrowser.exe
+/dist/
+*.exe
+
+# Local runtime state and secrets. Never commit these: .env holds the admin
+# password, and data/ holds password hashes.
+.env
+.env.local
+*.env
+/data/
+/config.yaml
+
+# Test and coverage output
+*.out
+coverage.*
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

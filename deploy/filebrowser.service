@@ -1,0 +1,71 @@
+# Systemd unit for a native (non-Docker) install.
+#
+#   sudo useradd -r -s /usr/sbin/nologin filebrowser
+#   sudo install -m 0755 filebrowser /usr/local/bin/filebrowser
+#   sudo install -m 0644 deploy/filebrowser.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now filebrowser
+#
+# Adjust FB_ROOT and FB_DATA_DIR to match where your files and database live.
+
+[Unit]
+Description=File Browser (private authenticated file access)
+Documentation=https://github.com/rackhaven/FileBrowser
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=filebrowser
+Group=filebrowser
+
+ExecStart=/usr/local/bin/filebrowser serve \
+  --listen 127.0.0.1:8080 \
+  --root /srv/files \
+  --data /var/lib/filebrowser
+
+# Only used on first start, when the database has no accounts.
+Environment=FB_TRUST_PROXY_HEADERS=true
+
+Restart=on-failure
+RestartSec=5s
+
+# The server streams files of arbitrary size, so no write timeout.
+TimeoutStopSec=45s
+KillSignal=SIGTERM
+
+# --- hardening -------------------------------------------------------------
+# The service needs write access to its data directory and read access to the
+# root, and nothing else.
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# The single exception to ProtectSystem=strict.
+ReadWritePaths=/var/lib/filebrowser
+# Allow uploads to land in the served tree when you grant write access.
+ReadWritePaths=/srv/files
+
+RestrictAddressFamilies=AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

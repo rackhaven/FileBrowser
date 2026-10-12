@@ -1,0 +1,40 @@
+# Example configuration.
+#
+#   filebrowser serve --config /etc/filebrowser/config.yaml
+#
+# Every value can also be set with an environment variable (FB_*), which takes
+# precedence over this file. Command-line flags beat both.
+
+# Where the HTTP server binds. Keep it on loopback if you terminate TLS at a
+# reverse proxy, or use Tailscale/WireGuard, so nothing is exposed directly.
+listen: "0.0.0.0:8080"
+
+# The only directory ever exposed. No request can read a byte outside this
+# tree, even for an administrator.
+root: /srv/files
+
+# Where the user database (users.json) lives. Must be writable, and should be
+# backed up: it holds the accounts and password hashes.
+data_dir: /var/lib/filebrowser
+
+# How long a sign-in stays valid. The window slides while a user is active.
+# Sessions live in memory, so a restart signs everyone out.
+session_ttl: 168h   # 7 days
+
+# --- TLS ---------------------------------------------------------------------
+# Usually leave these empty and put Caddy, Traefik or nginx in front, since a
+# reverse proxy renews certificates for you. Set both only if you are
+# terminating TLS here (for example with a cert from certbot or Tailscale).
+
+# tls_cert: /etc/letsencrypt/live/files.example.com/fullchain.pem
+# tls_key:  /etc/letsencrypt/live/files.example.com/privkey.pem
+
+# --- Cookies -----------------------------------------------------------------
+# Set to true ONLY when a reverse proxy you control terminates TLS. It makes
+# the server trust X-Forwarded-Proto so the session cookie is marked Secure.
+#
+# Leaving this false while sitting behind an HTTPS proxy means the cookie is
+# not marked Secure. Leaving it true while directly exposed to the internet
+# would let an attacker set the header themselves, though the cookie is still
+# HttpOnly and SameSite=Strict either way.
+trust_proxy_headers: false

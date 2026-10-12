@@ -1,0 +1,27 @@
+# Keep the build context small and never send secrets or local runtime state
+# into the image.
+
+.git/
+.gitignore
+
+# Never bake secrets or a real user database into an image layer.
+.env
+.env.*
+data/
+config.yaml
+
+# Local build output
+/filebrowser
+/filebrowser.exe
+dist/
+
+# Screenshots produced by tools/screenshot.mjs. The **/ pattern is negated for
+# web/assets because the PWA icons live there and the embed directive needs
+# them at build time.
+**/*.png
+!web/assets/*.png
+
+# Docs and CI config do not affect the build
+README.md
+deploy/
+.github/
