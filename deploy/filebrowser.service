@@ -64,8 +64,17 @@ ReadWritePaths=/var/lib/filebrowser
 ReadWritePaths=/srv/files
 
 RestrictAddressFamilies=AF_INET AF_INET6
-IPAddressDeny=any
-IPAddressAllow=localhost
+
+# Optional hardening: refuse every non-loopback connection.
+#
+# Left commented out on purpose. It is easy to enable and then wonder why a
+# phone on the LAN, or a Tailscale address, cannot reach the service: the
+# service binds 127.0.0.1 already, which is the control that matters, and a
+# reverse proxy or `tailscale serve` connects over loopback too.
+#
+# Enable it ONLY if the service is genuinely never contacted directly:
+#   IPAddressDeny=any
+#   IPAddressAllow=localhost
 
 [Install]
 WantedBy=multi-user.target
