@@ -232,8 +232,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Preserve the executable bit for things like .sh and binaries uploaded
-	// from a phone, but do not honour the wider mode.
+	// Force a predictable, non-executable mode. 0644 regardless of what the
+	// source mode looked like: uploads are never made executable, so an
+	// uploaded .sh cannot be run by accident before anyone inspects it.
 	if err := os.Chmod(tmpName, 0o644); err != nil {
 		s.logError("chmod upload", "err", err)
 	}
