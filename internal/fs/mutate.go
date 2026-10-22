@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -30,6 +31,9 @@ func (f *FS) Mkdir(u *auth.User, dir, name string) (Entry, error) {
 	vpath, err := Join(dir, name)
 	if err != nil {
 		return Entry{}, err
+	}
+	if isUploadTempName(name) {
+		return Entry{}, ErrReserved
 	}
 	real, err := f.Resolve(u, dir, auth.AccessWrite)
 	if err != nil {
@@ -70,6 +74,9 @@ func (f *FS) UploadTarget(u *auth.User, dir, name string) (real, vpath string, e
 	if err != nil {
 		return "", "", err
 	}
+	if isUploadTempName(name) {
+		return "", "", ErrReserved
+	}
 	realDir, err := f.Resolve(u, dir, auth.AccessWrite)
 	if err != nil {
 		return "", "", err
@@ -88,7 +95,11 @@ func (f *FS) UploadTarget(u *auth.User, dir, name string) (real, vpath string, e
 // Remove deletes a file or (recursively) a directory. Write access on the
 // entry itself is required.
 func (f *FS) Remove(u *auth.User, vpath string) error {
-	real, err := f.Resolve(u, vpath, auth.AccessWrite)
+	vp := Clean(vpath)
+	if isUploadTempName(path.Base(vp)) {
+		return ErrReserved
+	}
+	real, err := f.Resolve(u, vp, auth.AccessWrite)
 	if err != nil {
 		return err
 	}
@@ -103,6 +114,12 @@ func (f *FS) Remove(u *auth.User, vpath string) error {
 // even see.
 func (f *FS) Rename(u *auth.User, from, toDir, newName string) (Entry, error) {
 	fromVP := Clean(from)
+	if isUploadTempName(path.Base(fromVP)) {
+		return Entry{}, ErrReserved
+	}
+	if isUploadTempName(newName) {
+		return Entry{}, ErrReserved
+	}
 	src, err := f.Resolve(u, fromVP, auth.AccessWrite)
 	if err != nil {
 		return Entry{}, err

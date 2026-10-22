@@ -44,7 +44,21 @@ var (
 	ErrNotExist = errors.New("fs: not found")
 	// ErrNotDir means a directory was required.
 	ErrNotDir = errors.New("fs: not a directory")
+	// ErrReserved means the name collides with the temporary files the
+	// uploader uses while an upload is still in flight.
+	ErrReserved = errors.New("fs: name is reserved while uploads are in flight")
 )
+
+// uploadTempPrefix marks the temporary files the upload handler writes
+// before renaming into place. Names with this prefix are hidden from
+// listings and refused for new entries, so an in-flight upload can never be
+// renamed, deleted or shadowed by another request.
+const uploadTempPrefix = ".upload-"
+
+// isUploadTempName reports whether name collides with in-flight uploads.
+func isUploadTempName(name string) bool {
+	return strings.HasPrefix(name, uploadTempPrefix)
+}
 
 // FS is a rooted view of the filesystem with ACL enforcement.
 type FS struct {
@@ -260,6 +274,14 @@ func (f *FS) List(u *auth.User, vpath string) ([]Entry, error) {
 	entries := make([]Entry, 0, len(des))
 	for _, de := range des {
 		name := de.Name()
+
+		// Temporary upload files are not listings material: they exist for
+		// the seconds between the upload body arriving and the rename into
+		// place, and another viewer shouldn't see (or race) them.
+		if isUploadTempName(name) {
+			continue
+		}
+
 		child, err := Join(vpath, name)
 		if err != nil {
 			continue // defensive: a name we cannot address is not listable
