@@ -805,3 +805,93 @@ func TestLimiterKeysOnPeerAddressWhenProxyUntrusted(t *testing.T) {
 	}
 	h.postXFF("198.51.100.99", 1, http.StatusTooManyRequests)
 }
+
+// ------------------------------------------------- status and csrf guard ---
+
+func TestStatusKeepsOnlySetupSignal(t *testing.T) {
+	h := newHarness(t)
+
+	resp := h.get(http.DefaultClient, "/api/status")
+	payload := decode(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status %d, want 200", resp.StatusCode)
+	}
+	if payload["needs_bootstrap"] != false {
+		t.Errorf("needs_bootstrap = %v, want false (an admin was seeded)", payload["needs_bootstrap"])
+	}
+	for _, leaked := range []string{"version", "uptime"} {
+		if _, present := payload[leaked]; present {
+			t.Errorf("public status leaked %q", leaked)
+		}
+	}
+
+	client := h.login("admin", "password123")
+	me := decode(t, h.get(client, "/api/auth/me"))
+	if me["version"] != "test" {
+		t.Errorf("me version = %v, want the build version", me["version"])
+	}
+	if me["uptime"] == "" {
+		t.Error("me response should carry uptime with the build details")
+	}
+}
+
+func TestOriginGuard(t *testing.T) {
+	h := newHarness(t)
+	login := func(headers map[string]string) int {
+		h.t.Helper()
+		req, err := http.NewRequest(http.MethodPost, h.server.URL+"/api/auth/login",
+			strings.NewReader(`{"username":"admin","password":"password123"}`))
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// A foreign origin is refused outright.
+	if got := login(map[string]string{"Origin": "https://attacker.example"}); got != http.StatusForbidden {
+		t.Errorf("cross-origin POST: status %d, want 403", got)
+	}
+	// So are foreign Sec-Fetch-Site values, with or without Origin.
+	if got := login(map[string]string{"Sec-Fetch-Site": "cross-site"}); got != http.StatusForbidden {
+		t.Errorf("cross-site fetch: status %d, want 403", got)
+	}
+	// A same-origin announcement is fine.
+	if got := login(map[string]string{"Origin": h.server.URL}); got != http.StatusOK {
+		t.Errorf("same-origin POST: status %d, want 200", got)
+	}
+	// Non-browser clients carry neither header and keep working.
+	if got := login(nil); got != http.StatusOK {
+		t.Errorf("headerless POST: status %d, want 200", got)
+	}
+}
+
+// Reads carry no side effects, so the guard lets them through whatever origin
+// a browser announces.
+func TestOriginGuardDoesNotTouchReads(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	req, err := http.NewRequest(http.MethodGet, h.server.URL+"/api/fs/list?path=/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", "https://attacker.example")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("cross-origin GET: status %d, want 200", resp.StatusCode)
+	}
+}

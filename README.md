@@ -305,7 +305,8 @@ never sent to a client; the struct that reaches the API has no field for it.
 password, disabling an account or an admin resetting a password all revoke
 existing sessions immediately rather than waiting for a cookie to expire.
 Cookies are `HttpOnly`, `SameSite=Strict`, and `Secure` whenever the connection
-is known to be HTTPS.
+is known to be HTTPS. On top of that, state-changing requests are refused when
+the browser announces a foreign `Origin` or `Sec-Fetch-Site`.
 
 **Sign-in throttling**: 8 attempts per IP per 15 minutes. Failures are
 indistinguishable in wording *and* in timing (every attempt is hashed,
@@ -424,10 +425,10 @@ noted.
 
 | Method | Path | |
 | --- | --- | --- |
-| `GET` | `/api/status` | version, uptime, whether setup is needed (public) |
+| `GET` | `/api/status` | whether setup is needed (public; no build details) |
 | `POST` | `/api/auth/login` | `{username, password}` → sets the session cookie |
 | `POST` | `/api/auth/logout` | revokes the session |
-| `GET` | `/api/auth/me` | current user |
+| `GET` | `/api/auth/me` | current user, plus version and uptime |
 | `POST` | `/api/auth/password` | `{current_password, new_password}` |
 | `POST` | `/api/auth/bootstrap` | create the first admin; only while zero users exist |
 

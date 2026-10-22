@@ -32,6 +32,13 @@ type meResponse struct {
 	User         auth.PublicUser `json:"user"`
 	MustChange   bool            `json:"must_change_password"`
 	SessionUntil string          `json:"session_expires"`
+	Version      string          `json:"version"`
+	Uptime       string          `json:"uptime"`
+}
+
+// uptime is how long the process has been up, rounded for stable output.
+func (s *Server) uptime() string {
+	return time.Since(s.started).Round(time.Second).String()
 }
 
 // handleLogin exchanges credentials for a session cookie.
@@ -90,6 +97,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, meResponse{
 		User:       user.Public(),
 		MustChange: user.MustChangePassword,
+		Version:    s.version,
+		Uptime:     s.uptime(),
 	})
 }
 
@@ -110,6 +119,8 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, meResponse{
 		User:       u.Public(),
 		MustChange: u.MustChangePassword,
+		Version:    s.version,
+		Uptime:     s.uptime(),
 	})
 }
 
@@ -159,13 +170,13 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleStatus reports build info and whether any account exists yet. It is
-// unauthenticated on purpose so a fresh install can show a "create the first
-// admin" prompt, but it exposes no user data.
+// handleStatus reports whether any account exists yet. It is unauthenticated
+// on purpose so a fresh install can show a "create the first admin" prompt,
+// and deliberately says nothing else: version and uptime would help someone
+// fingerprint the install, so they arrive only with an authenticated
+// /api/auth/me response instead.
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":         s.version,
 		"needs_bootstrap": s.users.Count() == 0,
-		"uptime":          time.Since(s.started).Round(time.Second).String(),
 	})
 }

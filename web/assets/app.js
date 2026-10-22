@@ -903,7 +903,6 @@ async function boot() {
 
   try {
     const status = await API.status();
-    $('menu-version').textContent = `v${status.version} · up ${status.uptime}`;
     if (status.needs_bootstrap) return showBootstrap();
   } catch {
     toast('Cannot reach the server.', 'err');
@@ -911,6 +910,7 @@ async function boot() {
 
   try {
     const me = await API.me();
+    $('menu-version').textContent = `v${me.version} · up ${me.uptime}`;
     if (me.must_change_password) return showPasswordChange();
     showApp(me.user);
   } catch (err) {

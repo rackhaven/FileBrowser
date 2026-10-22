@@ -64,7 +64,7 @@ func (s *Server) Handler() http.Handler {
 	// shell for navigations and JSON for /api/.
 	mux.HandleFunc("/", s.handleNotFound)
 
-	return s.withRecovery(s.requestLogger(securityHeaders(mux)))
+	return s.withRecovery(s.requestLogger(originGuard(securityHeaders(mux))))
 }
 
 // handleNotFound serves the SPA shell for unknown non-API paths, so deep links

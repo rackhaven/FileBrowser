@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -358,6 +359,46 @@ func (s *Server) clientIP(r *http.Request) string {
 		}
 	}
 	return clientIP(r)
+}
+
+// originGuard rejects state-changing requests whose browser-announced origin
+// does not match the host the request arrived for.
+//
+// SameSite=Strict already keeps the session cookie from riding along on
+// cross-site requests, so this is defence in depth rather than the primary
+// control: it also covers cases where the cookie constraint is bypassed by
+// cookie-fixing or non-standard cookie handling. Requests without the
+// headers (curl, and other non-browser clients) pass through untouched, and
+// read methods are never blocked since they carry no side effects.
+func originGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+			origin := r.Header.Get("Origin")
+			if origin != "" && !originMatchesHost(origin, r.Host) {
+				writeError(w, http.StatusForbidden, "cross-origin requests are not accepted")
+				return
+			}
+			sf := r.Header.Get("Sec-Fetch-Site")
+			if sf != "" && sf != "same-origin" && sf != "none" {
+				writeError(w, http.StatusForbidden, "cross-origin requests are not accepted")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// originMatchesHost compares the origin's host:port with the request's Host
+// header. Scheme is deliberately ignored: with TLS terminated anywhere
+// (directly or at a proxy), what matters is the identity of the site, not
+// how the client reached it.
+func originMatchesHost(origin, host string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return strings.EqualFold(u.Host, host)
 }
 
 // writeJSON sends a JSON response with the given status.
