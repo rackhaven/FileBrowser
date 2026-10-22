@@ -3,6 +3,7 @@
 /filebrowser.exe
 /dist/
 *.exe
+/fb-linux-amd64
 
 # Local runtime state and secrets. Never commit these: .env holds the admin
 # password, and data/ holds password hashes.
