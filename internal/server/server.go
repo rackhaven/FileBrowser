@@ -55,12 +55,16 @@ const defaultMaxUpload = 32 << 30
 
 // Server wires the user store, sessions, filesystem view and HTTP routes.
 type Server struct {
-	cfg       Config
-	users     *auth.Store
-	sessions  *auth.Sessions
-	files     *fs.FS
-	static    stdfs.FS
-	limiter   *rateLimiter
+	cfg      Config
+	users    *auth.Store
+	sessions *auth.Sessions
+	files    *fs.FS
+	static   stdfs.FS
+	limiter  *rateLimiter
+	// loginGate bounds concurrent password hashing on the unauthenticated
+	// login path, so the per-attempt memory cost of argon2id is capped no
+	// matter how many source addresses arrive at once.
+	loginGate chan struct{}
 	started   time.Time
 	version   string
 	log       *slog.Logger
@@ -101,6 +105,7 @@ func New(opt Options) *Server {
 		files:     opt.FS,
 		static:    opt.Static,
 		limiter:   newRateLimiter(8, 15*time.Minute),
+		loginGate: make(chan struct{}, 4),
 		started:   time.Now(),
 		version:   opt.Version,
 		log:       logger,
@@ -163,6 +168,32 @@ func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 func userFrom(ctx context.Context) *auth.User {
 	u, _ := ctx.Value(ctxUser).(*auth.User)
 	return u
+}
+
+// allowLogin acquires one of the few slots for password hashing, or gives up
+// after a short wait and closes with 503.
+//
+// Every sign-in attempt is hashed, including attempts against usernames that
+// do not exist, which is what keeps unknown users and wrong passwords
+// indistinguishable in timing. That makes each attempt cost about 64 MiB of
+// memory; the per-IP throttle bounds one address, and this gate bounds the
+// whole process when many addresses arrive at once.
+func (s *Server) allowLogin(w http.ResponseWriter) bool {
+	select {
+	case s.loginGate <- struct{}{}:
+		return true
+	default:
+	}
+	// Slots busy. Wait briefly so an honest burst of sign-ins queues rather
+	// than erroring, then refuse politely.
+	select {
+	case s.loginGate <- struct{}{}:
+		return true
+	case <-time.After(3 * time.Second):
+		w.Header().Set("Retry-After", "2")
+		writeError(w, http.StatusServiceUnavailable, "sign-in is busy, try again shortly")
+		return false
+	}
 }
 
 // secure reports whether the request arrived over TLS, so the session cookie

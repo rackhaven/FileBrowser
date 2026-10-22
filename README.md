@@ -308,8 +308,11 @@ Cookies are `HttpOnly`, `SameSite=Strict`, and `Secure` whenever the connection
 is known to be HTTPS.
 
 **Sign-in throttling**: 8 attempts per IP per 15 minutes. Failures are
-indistinguishable in wording *and* in timing, so the endpoint cannot be used to
-enumerate accounts.
+indistinguishable in wording *and* in timing (every attempt is hashed,
+including ones for usernames that do not exist), so the endpoint cannot be
+used to enumerate accounts. A process-wide gate caps how many attempts are
+hashed at the same moment, bounding the memory that hashing consumes when
+attempts arrive from many addresses at once.
 
 **No self-service signup.** Accounts exist only if an administrator creates
 them, so a server exposed to the internet cannot be joined by a stranger.

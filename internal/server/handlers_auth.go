@@ -52,6 +52,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if !s.allowLogin(w) {
+		return
+	}
+	defer func() { <-s.loginGate }()
 	req.Username = strings.TrimSpace(req.Username)
 
 	user, err := s.users.GetByUsername(req.Username)
