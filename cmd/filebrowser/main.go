@@ -105,8 +105,8 @@ Passwords are always prompted for; they are never accepted as arguments,
 because command lines are visible to other processes and shell history.
 
 Environment: FB_LISTEN, FB_ROOT, FB_DATA_DIR, FB_SESSION_TTL, FB_TLS_CERT,
-FB_TLS_KEY, FB_TRUST_PROXY_HEADERS, FB_LOG_LEVEL, FB_ADMIN_USER,
-FB_ADMIN_PASSWORD
+FB_TLS_KEY, FB_TRUST_PROXY_HEADERS, FB_MAX_UPLOAD_BYTES, FB_LOG_LEVEL,
+FB_ADMIN_USER, FB_ADMIN_PASSWORD
 `)
 }
 
@@ -162,6 +162,7 @@ func runServe(args []string) error {
 		Config: server.Config{
 			TrustProxyHeaders: cfg.TrustProxyHeaders,
 			SessionTTL:        cfg.SessionTTL,
+			MaxUploadBytes:    cfg.MaxUploadBytes,
 		},
 		Users:    store,
 		Sessions: sessions,

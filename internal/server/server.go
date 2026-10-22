@@ -43,19 +43,28 @@ const sessionCookie = "fb_session"
 type Config struct {
 	TrustProxyHeaders bool
 	SessionTTL        time.Duration
+	// MaxUploadBytes caps an upload request body. Zero falls back to the
+	// server default so a caller that forgets the field stays safe.
+	MaxUploadBytes int64
 }
+
+// defaultMaxUpload is used whenever no usable cap is supplied. It is the
+// same 32 GiB baked into config.Default, restated here so the HTTP layer
+// stays safe even when a caller constructs Options by hand (tests do).
+const defaultMaxUpload = 32 << 30
 
 // Server wires the user store, sessions, filesystem view and HTTP routes.
 type Server struct {
-	cfg      Config
-	users    *auth.Store
-	sessions *auth.Sessions
-	files    *fs.FS
-	static   stdfs.FS
-	limiter  *rateLimiter
-	started  time.Time
-	version  string
-	log      *slog.Logger
+	cfg       Config
+	users     *auth.Store
+	sessions  *auth.Sessions
+	files     *fs.FS
+	static    stdfs.FS
+	limiter   *rateLimiter
+	started   time.Time
+	version   string
+	log       *slog.Logger
+	maxUpload int64
 }
 
 // Options configures New.
@@ -81,16 +90,21 @@ func New(opt Options) *Server {
 	if sessions == nil {
 		sessions = auth.NewSessions(opt.Config.SessionTTL)
 	}
+	uploadMax := opt.Config.MaxUploadBytes
+	if uploadMax <= 0 {
+		uploadMax = defaultMaxUpload
+	}
 	return &Server{
-		cfg:      opt.Config,
-		users:    opt.Users,
-		sessions: sessions,
-		files:    opt.FS,
-		static:   opt.Static,
-		limiter:  newRateLimiter(8, 15*time.Minute),
-		started:  time.Now(),
-		version:  opt.Version,
-		log:      logger,
+		cfg:       opt.Config,
+		users:     opt.Users,
+		sessions:  sessions,
+		files:     opt.FS,
+		static:    opt.Static,
+		limiter:   newRateLimiter(8, 15*time.Minute),
+		started:   time.Now(),
+		version:   opt.Version,
+		log:       logger,
+		maxUpload: uploadMax,
 	}
 }
 

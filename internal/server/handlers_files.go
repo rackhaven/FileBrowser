@@ -215,10 +215,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// Any failure past this point must remove the temp file.
 	defer os.Remove(tmpName) // no-op once the rename succeeds
 
-	// Cap the body so a hostile client cannot fill the disk. The limit is set
-	// generously; raise it in config if you need bigger files.
-	const maxUpload = 32 << 30 // 32 GiB
-	written, err := io.Copy(tmp, http.MaxBytesReader(w, r.Body, maxUpload))
+	// Cap the body so a hostile client cannot fill the disk. The limit comes
+	// from max_upload_bytes, which defaults to 32 GiB.
+	written, err := io.Copy(tmp, http.MaxBytesReader(w, r.Body, s.maxUpload))
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
