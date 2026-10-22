@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lennox/filebrowser/internal/auth"
+	"github.com/rackhaven/filebrowser/internal/auth"
 )
 
 type loginRequest struct {

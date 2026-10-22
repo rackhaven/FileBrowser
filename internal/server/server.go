@@ -26,8 +26,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lennox/filebrowser/internal/auth"
-	"github.com/lennox/filebrowser/internal/fs"
+	"github.com/rackhaven/filebrowser/internal/auth"
+	"github.com/rackhaven/filebrowser/internal/fs"
 )
 
 type ctxKey string

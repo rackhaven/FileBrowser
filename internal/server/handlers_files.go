@@ -26,8 +26,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/lennox/filebrowser/internal/auth"
-	"github.com/lennox/filebrowser/internal/fs"
+	"github.com/rackhaven/filebrowser/internal/auth"
+	"github.com/rackhaven/filebrowser/internal/fs"
 )
 
 // writeFSError maps filesystem errors onto HTTP responses. Callers get a

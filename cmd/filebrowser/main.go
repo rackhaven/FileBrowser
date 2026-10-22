@@ -40,11 +40,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/lennox/filebrowser/internal/auth"
-	"github.com/lennox/filebrowser/internal/config"
-	"github.com/lennox/filebrowser/internal/fs"
-	"github.com/lennox/filebrowser/internal/server"
-	"github.com/lennox/filebrowser/web"
+	"github.com/rackhaven/filebrowser/internal/auth"
+	"github.com/rackhaven/filebrowser/internal/config"
+	"github.com/rackhaven/filebrowser/internal/fs"
+	"github.com/rackhaven/filebrowser/internal/server"
+	"github.com/rackhaven/filebrowser/web"
 )
 
 // version is overridable at build time: -ldflags "-X main.version=1.2.3"

@@ -20,7 +20,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/lennox/filebrowser/internal/auth"
+	"github.com/rackhaven/filebrowser/internal/auth"
 )
 
 // handleListUsers returns all accounts (admin only).

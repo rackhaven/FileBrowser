@@ -1,4 +1,4 @@
-module github.com/lennox/filebrowser
+module github.com/rackhaven/filebrowser
 
 go 1.22
 
