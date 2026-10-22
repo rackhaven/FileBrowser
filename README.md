@@ -248,6 +248,13 @@ Point it at the same database the server uses:
 filebrowser user list --data /var/lib/filebrowser   # or set FB_DATA_DIR
 ```
 
+Running these while the server is up is safe. Both processes coordinate
+through an advisory lock (`users.json.lock`) and the server re-reads the
+database before every change, so a CLI edit cannot interleave with, or be
+silently overwritten by, a live server's own write. The one exception is
+Windows, where the lock is a no-op: do CLI maintenance while the server
+is stopped.
+
 ---
 
 ## Configuration

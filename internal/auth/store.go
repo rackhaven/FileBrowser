@@ -43,10 +43,25 @@ type database struct {
 // Store is a JSON-file-backed user database. Writes are serialised and land
 // atomically via a temp file + rename, so a crash mid-write cannot corrupt the
 // only copy of the accounts.
+//
+// Two processes may hold the same database open: the server and the CLI
+// (`filebrowser user ...`). They coordinate through an advisory lock on
+// users.json.lock, and every mutation first re-reads the file when it changed
+// underneath us, so a CLI password reset cannot be silently overwritten by
+// the server's next save. The lock file is separate because users.json itself
+// is replaced on every write, which would strand a lock on a dead inode.
 type Store struct {
 	mu   sync.RWMutex
 	path string
-	db   database
+	// lockFile is held open for the life of the process; the advisory lock
+	// taken on it lives with the open file description, so a crashed process
+	// never strands the lock.
+	lockFile *os.File
+	// lastSize and lastMod describe the copy of the database this process
+	// last read or wrote, for change detection.
+	lastSize int64
+	lastMod  time.Time
+	db       database
 }
 
 const dbVersion = 1
@@ -58,9 +73,20 @@ func OpenStore(path string) (*Store, error) {
 		return nil, fmt.Errorf("auth: create data dir: %w", err)
 	}
 
+	// The lock file is opened here rather than next to the data file because
+	// users.json is replaced by rename on every save; a lock on it would die
+	// with each write. Creation happens for fresh installs too, since every
+	// write path depends on the lock existing.
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("auth: open %s.lock: %w", path, err)
+	}
+	s.lockFile = lock
+
 	raw, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
+		s.noteStat()
 		return s, nil // fresh install; no users yet
 	case err != nil:
 		return nil, fmt.Errorf("auth: read %s: %w", path, err)
@@ -72,8 +98,93 @@ func OpenStore(path string) (*Store, error) {
 	for _, u := range s.db.Users {
 		u.Username = strings.ToLower(strings.TrimSpace(u.Username))
 	}
+
+	s.noteStat()
 	return s, nil
 }
+
+// noteStat remembers the size and modtime of the database file as last seen.
+// Callers invoke it right after loading or right after a successful save, so
+// a change made by anyone else registers as new.
+func (s *Store) noteStat() {
+	info, err := os.Stat(s.path)
+	if err != nil {
+		s.lastSize, s.lastMod = 0, time.Time{}
+		return
+	}
+	s.lastSize = info.Size()
+	s.lastMod = info.ModTime()
+}
+
+// reloadIfChanged replaces the in-memory database when another process wrote
+// the file since we last read or wrote it. The caller must hold the
+// cross-process lock, which closes the window between read and save.
+func (s *Store) reloadIfChanged() error {
+	info, err := os.Stat(s.path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		// Never seen (install still fresh), or transient. Keep what we have.
+		return nil
+	case err != nil:
+		return fmt.Errorf("auth: stat %s: %w", s.path, err)
+	}
+	if info.Size() == s.lastSize && info.ModTime().Equal(s.lastMod) {
+		return nil
+	}
+	raw, err := os.ReadFile(s.path)
+	if err != nil {
+		return fmt.Errorf("auth: read %s: %w", s.path, err)
+	}
+	fresh := database{Version: dbVersion}
+	if err := json.Unmarshal(raw, &fresh); err != nil {
+		return fmt.Errorf("auth: parse %s: %w", s.path, err)
+	}
+	s.db.Users = fresh.Users
+	for _, u := range s.db.Users {
+		u.Username = strings.ToLower(strings.TrimSpace(u.Username))
+	}
+	s.noteStat()
+	return nil
+}
+
+// withFileLock runs op under the cross-process lock, after first pulling in
+// any changes another process has written. Everything that modifies the
+// database goes through here, which is what makes a CLI edit safe to run
+// against a live server: the stale copy is refreshed, not saved over.
+func (s *Store) withFileLock(op func() error) error {
+	if err := s.lockEx(); err != nil {
+		return fmt.Errorf("auth: lock %s: %w", s.path, err)
+	}
+	defer func() {
+		_ = s.lockUn() // distinctly unlikely to fail; a released process exits
+	}()
+
+	if err := s.reloadIfChanged(); err != nil {
+		return err
+	}
+	if err := op(); err != nil {
+		return err
+	}
+	s.noteStat()
+	return nil
+}
+
+// LockExclusive takes the cross-process lock for the caller's whole command.
+// The CLI uses this so `user add` performs its check-then-create pair inside
+// one locked window. Lock changes made by other processes are read in.
+func (s *Store) LockExclusive() error {
+	if err := s.lockEx(); err != nil {
+		return fmt.Errorf("auth: lock %s: %w", s.path, err)
+	}
+	if err := s.reloadIfChanged(); err != nil {
+		_ = s.lockUn()
+		return err
+	}
+	return nil
+}
+
+// Unlock releases the cross-process lock taken by LockExclusive.
+func (s *Store) Unlock() error { return s.lockUn() }
 
 // save writes the database atomically. Callers must hold s.mu.
 func (s *Store) save() error {
@@ -190,14 +301,7 @@ func (s *Store) Create(username, password string, admin bool, grants []Grant) (P
 		return PublicUser{}, err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, u := range s.db.Users {
-		if u.Username == username {
-			return PublicUser{}, ErrUserExists
-		}
-	}
-	u := &User{
+	created := &User{
 		ID:           id,
 		Username:     username,
 		PasswordHash: hash,
@@ -205,12 +309,25 @@ func (s *Store) Create(username, password string, admin bool, grants []Grant) (P
 		Grants:       normaliseGrants(grants),
 		CreatedAt:    time.Now().UTC(),
 	}
-	s.db.Users = append(s.db.Users, u)
-	if err := s.save(); err != nil {
-		s.db.Users = s.db.Users[:len(s.db.Users)-1]
+	err = s.withFileLock(func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, u := range s.db.Users {
+			if u.Username == username {
+				return ErrUserExists
+			}
+		}
+		s.db.Users = append(s.db.Users, created)
+		if err := s.save(); err != nil {
+			s.db.Users = s.db.Users[:len(s.db.Users)-1]
+			return err
+		}
+		return nil
+	})
+	if err != nil {
 		return PublicUser{}, err
 	}
-	return u.Public(), nil
+	return created.Public(), nil
 }
 
 // SetPassword replaces a user's password. When force is true the user is
@@ -224,51 +341,61 @@ func (s *Store) SetPassword(id, password string, force bool) error {
 		return err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, u := range s.db.Users {
-		if u.ID != id {
-			continue
+	return s.withFileLock(func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, u := range s.db.Users {
+			if u.ID != id {
+				continue
+			}
+			oldHash, oldForce := u.PasswordHash, u.MustChangePassword
+			u.PasswordHash = hash
+			u.MustChangePassword = force
+			if err := s.save(); err != nil {
+				u.PasswordHash, u.MustChangePassword = oldHash, oldForce
+				return err
+			}
+			return nil
 		}
-		oldHash, oldForce := u.PasswordHash, u.MustChangePassword
-		u.PasswordHash = hash
-		u.MustChangePassword = force
-		if err := s.save(); err != nil {
-			u.PasswordHash, u.MustChangePassword = oldHash, oldForce
-			return err
-		}
-		return nil
-	}
-	return ErrNotFound
+		return ErrNotFound
+	})
 }
 
 // Update changes the non-secret attributes of an account.
 func (s *Store) Update(id string, mutate func(*User)) (PublicUser, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, u := range s.db.Users {
-		if u.ID != id {
-			continue
-		}
-		snapshot := *u
-		mutate(u)
-		u.Grants = normaliseGrants(u.Grants)
+	var updated PublicUser
+	err := s.withFileLock(func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, u := range s.db.Users {
+			if u.ID != id {
+				continue
+			}
+			snapshot := *u
+			mutate(u)
+			u.Grants = normaliseGrants(u.Grants)
 
-		// Never let the last enabled admin be demoted or disabled, otherwise
-		// the instance becomes unmanageable over the network.
-		if (snapshot.Admin && !u.Admin || snapshot.Admin && u.Disabled) && s.enabledAdminCountLocked(u.ID) == 0 {
-			u.Admin = snapshot.Admin
-			u.Disabled = snapshot.Disabled
-			return PublicUser{}, ErrLastAdmin
-		}
+			// Never let the last enabled admin be demoted or disabled, otherwise
+			// the instance becomes unmanageable over the network.
+			if (snapshot.Admin && !u.Admin || snapshot.Admin && u.Disabled) && s.enabledAdminCountLocked(u.ID) == 0 {
+				u.Admin = snapshot.Admin
+				u.Disabled = snapshot.Disabled
+				return ErrLastAdmin
+			}
 
-		if err := s.save(); err != nil {
-			*u = snapshot
-			return PublicUser{}, err
+			if err := s.save(); err != nil {
+				*u = snapshot
+				return err
+			}
+			updated = u.Public()
+			return nil
 		}
-		return u.Public(), nil
+		return ErrNotFound
+	})
+	if err != nil {
+		return PublicUser{}, err
 	}
-	return PublicUser{}, ErrNotFound
+	return updated, nil
 }
 
 // enabledAdminCountLocked counts enabled admins, optionally excluding one ID.
@@ -284,24 +411,26 @@ func (s *Store) enabledAdminCountLocked(exclude string) int {
 
 // Delete removes an account.
 func (s *Store) Delete(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, u := range s.db.Users {
-		if u.ID != id {
-			continue
+	return s.withFileLock(func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for i, u := range s.db.Users {
+			if u.ID != id {
+				continue
+			}
+			if u.Admin && !u.Disabled && s.enabledAdminCountLocked(u.ID) == 0 {
+				return ErrLastAdmin
+			}
+			snapshot := append([]*User(nil), s.db.Users...)
+			s.db.Users = append(s.db.Users[:i], s.db.Users[i+1:]...)
+			if err := s.save(); err != nil {
+				s.db.Users = snapshot
+				return err
+			}
+			return nil
 		}
-		if u.Admin && !u.Disabled && s.enabledAdminCountLocked(u.ID) == 0 {
-			return ErrLastAdmin
-		}
-		snapshot := append([]*User(nil), s.db.Users...)
-		s.db.Users = append(s.db.Users[:i], s.db.Users[i+1:]...)
-		if err := s.save(); err != nil {
-			s.db.Users = snapshot
-			return err
-		}
-		return nil
-	}
-	return ErrNotFound
+		return ErrNotFound
+	})
 }
 
 // normaliseGrants canonicalises paths and drops empty or zero-level rules so

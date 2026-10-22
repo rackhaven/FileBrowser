@@ -396,3 +396,71 @@ func TestConcurrentStoreAccess(t *testing.T) {
 		t.Fatalf("List returned %d users, want %d", len(users), workers)
 	}
 }
+
+// ------------------------------------------------- two processes, one db ---
+
+// Two open handles model a running server and a CLI working against the same
+// database file. The lock file serialises them and each mutation re-reads the
+// file when it changed, so a CLI edit is never silently overwritten by the
+// server's next save.
+func TestStoreCoordinatesSeparateHandles(t *testing.T) {
+	path := t.TempDir() + "/users.json"
+
+	server := newStoreAt(t, path)
+	cli := newStoreAt(t, path) // loaded before the server writes anything
+
+	if _, err := server.Create("admin", "password123", true, nil); err != nil {
+		t.Fatalf("seed admin: %v", err)
+	}
+
+	// The cli's copy is stale now. Its mutation must notice, reload, and
+	// create alice alongside the admin rather than clobbering the file.
+	created, err := cli.Create("alice", "wonderland9", false, nil)
+	if err != nil {
+		t.Fatalf("create through a stale handle: %v", err)
+	}
+	if _, err := cli.Create("alice", "wonderland9", false, nil); err != ErrUserExists {
+		t.Fatalf("stale handle double-create: %v, want ErrUserExists", err)
+	}
+
+	// The server's next write re-reads first, so alice keeps her account and
+	// gains the new password.
+	if err := server.SetPassword(created.ID, "newwonder9", true); err != nil {
+		t.Fatalf("server write after an external change: %v", err)
+	}
+
+	fresh := newStoreAt(t, path)
+	alive, err := fresh.GetByUsername("alice")
+	if err != nil {
+		t.Fatal("alice was lost when the server saved after the CLI")
+	}
+	if ok, err := VerifyPassword("newwonder9", alive.PasswordHash); err != nil || !ok {
+		t.Fatal("the password change was reverted or unverifiable")
+	}
+	admin, err := fresh.GetByUsername("admin")
+	if err != nil || !admin.Admin {
+		t.Fatal("the seed admin did not survive the cross-write sequence")
+	}
+
+	// Last-admin protection still works across handles: the cli (which has
+	// not seen the server's latest save) is refused when it tries to demote
+	// the only admin it knows about.
+	_, _ = cli.Update(admin.ID, func(u *User) {
+		u.Admin = false
+		if u.Grants == nil {
+			u.Grants = []Grant{}
+		}
+	})
+	if _, err := cli.Update(admin.ID, func(u *User) { u.Admin = false }); err != ErrLastAdmin {
+		t.Fatalf("last admin guard across handles: %v, want ErrLastAdmin", err)
+	}
+}
+
+func newStoreAt(t *testing.T, path string) *Store {
+	t.Helper()
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatalf("OpenStore %s: %v", path, err)
+	}
+	return s
+}
