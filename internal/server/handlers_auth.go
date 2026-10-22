@@ -40,7 +40,7 @@ type meResponse struct {
 // password both take the same time and return the same message, so the
 // endpoint cannot be used to enumerate accounts.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	if !s.limiter.allow(ip) {
 		w.Header().Set("Retry-After", "900")
 		writeError(w, http.StatusTooManyRequests, "too many sign-in attempts, try again later")

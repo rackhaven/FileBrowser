@@ -19,6 +19,10 @@ files.example.com {
 
 	# The server itself listens on plain HTTP on loopback only.
 	reverse_proxy 127.0.0.1:8080 {
+		# Overwrite rather than append: the server reads X-Forwarded-For only
+		# when trust_proxy_headers is on, so the value must be the address the
+		# connection itself reports, never anything a client supplied.
+		header_up X-Forwarded-For {http.request.remote.host}
 		header_up X-Forwarded-Proto {scheme}
 		header_up X-Real-IP {remote_host}
 	}

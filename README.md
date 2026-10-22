@@ -275,7 +275,7 @@ file.
 | `-data`         | `FB_DATA_DIR`          | `/data`        | holds `users.json`                  |
 | `-config`       | —                      | —              | YAML config file                    |
 |                | `FB_SESSION_TTL`       | `168h`         | how long a sign-in lasts            |
-|                | `FB_TRUST_PROXY_HEADERS` | `false`      | honour `X-Forwarded-Proto`          |
+|                | `FB_TRUST_PROXY_HEADERS` | `false`      | honour `X-Forwarded-Proto` and `X-Forwarded-For` |
 |                | `FB_MAX_UPLOAD_BYTES`  | `34359738368`  | largest upload, in bytes            |
 |                | `FB_TLS_CERT`/`FB_TLS_KEY` | —         | terminate TLS here instead          |
 |                | `FB_LOG_LEVEL`         | `info`         | `debug`, `info`, `warn`, `error`    |
@@ -329,7 +329,11 @@ except loopback.
 - **There is no second factor.** If you want it, put the service behind a VPN,
   or add an identity-aware proxy in front.
 - **Rate limiting is per process and per IP.** A restart clears it. It is there
-  to blunt guessing, not to be a hard control.
+  to blunt guessing, not to be a hard control. When `trust_proxy_headers` is
+  set, the address that is limited and logged comes from `X-Forwarded-For`,
+  which is why the flag should only be on behind a proxy that overwrites that
+  header with the client's address rather than appending to it (the sample
+  Caddyfile does exactly that).
 - **Uploads land in a temporary file and are renamed into place**, so an
   interrupted upload never leaves a truncated file that looks complete.
 - **Nothing is encrypted at rest** beyond what your filesystem does. If the disk

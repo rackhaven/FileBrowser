@@ -292,7 +292,7 @@ func (s *Server) requestLogger(next http.Handler) http.Handler {
 		// Skip routine static asset hits; always log problems.
 		if rec.status >= 400 || !strings.HasPrefix(r.URL.Path, "/static/") {
 			s.logf("request",
-				"ip", clientIP(r),
+				"ip", s.clientIP(r),
 				"method", r.Method,
 				"path", r.URL.Path,
 				"status", rec.status,
@@ -340,6 +340,24 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// clientIP returns the address a request is attributed to: the peer address
+// on a direct connection, or the originator named by X-Forwarded-For when the
+// request arrives through a proxy we were configured to trust. The header is
+// only read when trust_proxy_headers is set, and only its first entry is
+// used, which is safe only when the proxy replaces rather than appends (the
+// sample Caddyfile does).
+func (s *Server) clientIP(r *http.Request) string {
+	if s.cfg.TrustProxyHeaders {
+		if v := r.Header.Get("X-Forwarded-For"); v != "" {
+			first := strings.TrimSpace(strings.Split(v, ",")[0])
+			if first != "" {
+				return first
+			}
+		}
+	}
+	return clientIP(r)
 }
 
 // writeJSON sends a JSON response with the given status.

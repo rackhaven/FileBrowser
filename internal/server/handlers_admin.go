@@ -180,7 +180,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		s.writeUserError(w, r, err)
 		return
 	}
-	s.logf("bootstrap admin created", "user", pub.Username, "ip", clientIP(r))
+	s.logf("bootstrap admin created", "user", pub.Username, "ip", s.clientIP(r))
 	writeJSON(w, http.StatusCreated, pub)
 }
 
