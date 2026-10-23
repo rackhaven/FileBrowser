@@ -340,6 +340,13 @@ func runUser(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Hold the advisory lock for the whole command: the server coordinates
+	// through the same lock file, so an edit cannot interleave with (or be
+	// overwritten by) a live server's own write.
+	if err := store.LockExclusive(); err != nil {
+		return err
+	}
+	defer func() { _ = store.Unlock() }()
 
 	switch cmd {
 	case "add":

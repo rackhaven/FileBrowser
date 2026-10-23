@@ -248,6 +248,13 @@ Point it at the same database the server uses:
 filebrowser user list --data /var/lib/filebrowser   # or set FB_DATA_DIR
 ```
 
+Running these while the server is up is safe. Both processes coordinate
+through an advisory lock (`users.json.lock`) and the server re-reads the
+database before every change, so a CLI edit cannot interleave with, or be
+silently overwritten by, a live server's own write. The one exception is
+Windows, where the lock is a no-op: do CLI maintenance while the server
+is stopped.
+
 ---
 
 ## Configuration
@@ -268,7 +275,7 @@ file.
 | `-data`         | `FB_DATA_DIR`          | `/data`        | holds `users.json`                  |
 | `-config`       | —                      | —              | YAML config file                    |
 |                | `FB_SESSION_TTL`       | `168h`         | how long a sign-in lasts            |
-|                | `FB_TRUST_PROXY_HEADERS` | `false`      | honour `X-Forwarded-Proto`          |
+|                | `FB_TRUST_PROXY_HEADERS` | `false`      | honour `X-Forwarded-Proto` and `X-Forwarded-For` |
 |                | `FB_MAX_UPLOAD_BYTES`  | `34359738368`  | largest upload, in bytes            |
 |                | `FB_TLS_CERT`/`FB_TLS_KEY` | —         | terminate TLS here instead          |
 |                | `FB_LOG_LEVEL`         | `info`         | `debug`, `info`, `warn`, `error`    |
@@ -298,11 +305,15 @@ never sent to a client; the struct that reaches the API has no field for it.
 password, disabling an account or an admin resetting a password all revoke
 existing sessions immediately rather than waiting for a cookie to expire.
 Cookies are `HttpOnly`, `SameSite=Strict`, and `Secure` whenever the connection
-is known to be HTTPS.
+is known to be HTTPS. On top of that, state-changing requests are refused when
+the browser announces a foreign `Origin` or `Sec-Fetch-Site`.
 
 **Sign-in throttling**: 8 attempts per IP per 15 minutes. Failures are
-indistinguishable in wording *and* in timing, so the endpoint cannot be used to
-enumerate accounts.
+indistinguishable in wording *and* in timing (every attempt is hashed,
+including ones for usernames that do not exist), so the endpoint cannot be
+used to enumerate accounts. A process-wide gate caps how many attempts are
+hashed at the same moment, bounding the memory that hashing consumes when
+attempts arrive from many addresses at once.
 
 **No self-service signup.** Accounts exist only if an administrator creates
 them, so a server exposed to the internet cannot be joined by a stranger.
@@ -319,7 +330,11 @@ except loopback.
 - **There is no second factor.** If you want it, put the service behind a VPN,
   or add an identity-aware proxy in front.
 - **Rate limiting is per process and per IP.** A restart clears it. It is there
-  to blunt guessing, not to be a hard control.
+  to blunt guessing, not to be a hard control. When `trust_proxy_headers` is
+  set, the address that is limited and logged comes from `X-Forwarded-For`,
+  which is why the flag should only be on behind a proxy that overwrites that
+  header with the client's address rather than appending to it (the sample
+  Caddyfile does exactly that).
 - **Uploads land in a temporary file and are renamed into place**, so an
   interrupted upload never leaves a truncated file that looks complete.
 - **Nothing is encrypted at rest** beyond what your filesystem does. If the disk
@@ -410,10 +425,10 @@ noted.
 
 | Method | Path | |
 | --- | --- | --- |
-| `GET` | `/api/status` | version, uptime, whether setup is needed (public) |
+| `GET` | `/api/status` | whether setup is needed (public; no build details) |
 | `POST` | `/api/auth/login` | `{username, password}` → sets the session cookie |
 | `POST` | `/api/auth/logout` | revokes the session |
-| `GET` | `/api/auth/me` | current user |
+| `GET` | `/api/auth/me` | current user, plus version and uptime |
 | `POST` | `/api/auth/password` | `{current_password, new_password}` |
 | `POST` | `/api/auth/bootstrap` | create the first admin; only while zero users exist |
 

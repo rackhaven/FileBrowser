@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -55,12 +56,16 @@ const defaultMaxUpload = 32 << 30
 
 // Server wires the user store, sessions, filesystem view and HTTP routes.
 type Server struct {
-	cfg       Config
-	users     *auth.Store
-	sessions  *auth.Sessions
-	files     *fs.FS
-	static    stdfs.FS
-	limiter   *rateLimiter
+	cfg      Config
+	users    *auth.Store
+	sessions *auth.Sessions
+	files    *fs.FS
+	static   stdfs.FS
+	limiter  *rateLimiter
+	// loginGate bounds concurrent password hashing on the unauthenticated
+	// login path, so the per-attempt memory cost of argon2id is capped no
+	// matter how many source addresses arrive at once.
+	loginGate chan struct{}
 	started   time.Time
 	version   string
 	log       *slog.Logger
@@ -101,6 +106,7 @@ func New(opt Options) *Server {
 		files:     opt.FS,
 		static:    opt.Static,
 		limiter:   newRateLimiter(8, 15*time.Minute),
+		loginGate: make(chan struct{}, 4),
 		started:   time.Now(),
 		version:   opt.Version,
 		log:       logger,
@@ -163,6 +169,32 @@ func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 func userFrom(ctx context.Context) *auth.User {
 	u, _ := ctx.Value(ctxUser).(*auth.User)
 	return u
+}
+
+// allowLogin acquires one of the few slots for password hashing, or gives up
+// after a short wait and closes with 503.
+//
+// Every sign-in attempt is hashed, including attempts against usernames that
+// do not exist, which is what keeps unknown users and wrong passwords
+// indistinguishable in timing. That makes each attempt cost about 64 MiB of
+// memory; the per-IP throttle bounds one address, and this gate bounds the
+// whole process when many addresses arrive at once.
+func (s *Server) allowLogin(w http.ResponseWriter) bool {
+	select {
+	case s.loginGate <- struct{}{}:
+		return true
+	default:
+	}
+	// Slots busy. Wait briefly so an honest burst of sign-ins queues rather
+	// than erroring, then refuse politely.
+	select {
+	case s.loginGate <- struct{}{}:
+		return true
+	case <-time.After(3 * time.Second):
+		w.Header().Set("Retry-After", "2")
+		writeError(w, http.StatusServiceUnavailable, "sign-in is busy, try again shortly")
+		return false
+	}
 }
 
 // secure reports whether the request arrived over TLS, so the session cookie
@@ -261,7 +293,7 @@ func (s *Server) requestLogger(next http.Handler) http.Handler {
 		// Skip routine static asset hits; always log problems.
 		if rec.status >= 400 || !strings.HasPrefix(r.URL.Path, "/static/") {
 			s.logf("request",
-				"ip", clientIP(r),
+				"ip", s.clientIP(r),
 				"method", r.Method,
 				"path", r.URL.Path,
 				"status", rec.status,
@@ -309,6 +341,64 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// clientIP returns the address a request is attributed to: the peer address
+// on a direct connection, or the originator named by X-Forwarded-For when the
+// request arrives through a proxy we were configured to trust. The header is
+// only read when trust_proxy_headers is set, and only its first entry is
+// used, which is safe only when the proxy replaces rather than appends (the
+// sample Caddyfile does).
+func (s *Server) clientIP(r *http.Request) string {
+	if s.cfg.TrustProxyHeaders {
+		if v := r.Header.Get("X-Forwarded-For"); v != "" {
+			first := strings.TrimSpace(strings.Split(v, ",")[0])
+			if first != "" {
+				return first
+			}
+		}
+	}
+	return clientIP(r)
+}
+
+// originGuard rejects state-changing requests whose browser-announced origin
+// does not match the host the request arrived for.
+//
+// SameSite=Strict already keeps the session cookie from riding along on
+// cross-site requests, so this is defence in depth rather than the primary
+// control: it also covers cases where the cookie constraint is bypassed by
+// cookie-fixing or non-standard cookie handling. Requests without the
+// headers (curl, and other non-browser clients) pass through untouched, and
+// read methods are never blocked since they carry no side effects.
+func originGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+			origin := r.Header.Get("Origin")
+			if origin != "" && !originMatchesHost(origin, r.Host) {
+				writeError(w, http.StatusForbidden, "cross-origin requests are not accepted")
+				return
+			}
+			sf := r.Header.Get("Sec-Fetch-Site")
+			if sf != "" && sf != "same-origin" && sf != "none" {
+				writeError(w, http.StatusForbidden, "cross-origin requests are not accepted")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// originMatchesHost compares the origin's host:port with the request's Host
+// header. Scheme is deliberately ignored: with TLS terminated anywhere
+// (directly or at a proxy), what matters is the identity of the site, not
+// how the client reached it.
+func originMatchesHost(origin, host string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return strings.EqualFold(u.Host, host)
 }
 
 // writeJSON sends a JSON response with the given status.

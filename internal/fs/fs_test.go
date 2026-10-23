@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/rackhaven/filebrowser/internal/auth"
@@ -441,3 +442,58 @@ func TestOpenStreamsContent(t *testing.T) {
 		t.Fatalf("content = %q", buf)
 	}
 }
+
+// ------------------------------------------------------------ upload temps ---
+
+// In-flight uploads appear as .upload-* files in the served tree. They are
+// private to the uploader for the seconds they exist: listings hide them and
+// no mutation may be aimed at one.
+func TestListHidesInFlightUploads(t *testing.T) {
+	f := newTestFS(t)
+	u := user(auth.AccessAdmin)
+
+	writeFile(t, mustRoot(f), ".upload-4ghost.tmp", "in flight")
+	entries, err := f.List(u, "/")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name, ".upload-") {
+			t.Fatalf("listing exposed an in-flight upload: %s", e.Name)
+		}
+	}
+	if got := len(entries); got == 0 {
+		t.Fatal("listing came back empty, so nothing was actually hidden")
+	}
+}
+
+func TestTempNamesAreReserved(t *testing.T) {
+	f := newTestFS(t)
+	u := user(auth.AccessAdmin)
+	writeFile(t, mustRoot(f), ".upload-refused.tmp", "x")
+
+	if _, err := f.Mkdir(u, "/", ".upload-new"); err != ErrReserved {
+		t.Errorf("mkdir with a reserved name: got %v, want ErrReserved", err)
+	}
+	if _, _, err := f.UploadTarget(u, "/", ".upload-froze.tmp"); err != ErrReserved {
+		t.Errorf("upload with a reserved name: got %v, want ErrReserved", err)
+	}
+	if err := f.Remove(u, "/.upload-refused.tmp"); err != ErrReserved {
+		t.Errorf("remove a temp name: got %v, want ErrReserved", err)
+	}
+	if _, err := f.Rename(u, "/.upload-refused.tmp", "/", "gone.tmp"); err != ErrReserved {
+		t.Errorf("rename away from a temp name: got %v, want ErrReserved", err)
+	}
+	if _, err := f.Rename(u, "/docs/readme.txt", "/", ".upload-hijack.tmp"); err != ErrReserved {
+		t.Errorf("rename onto a temp name: got %v, want ErrReserved", err)
+	}
+
+	// The same operations with unreserved names keep working.
+	if err := f.Remove(u, "/docs/readme.txt"); err != nil {
+		t.Errorf("remove of an ordinary name: %v", err)
+	}
+}
+
+// mustRoot returns the filesystem's real root, for planting temp files on
+// disk directly (the API itself refuses to create them).
+func mustRoot(f *FS) string { return f.Root() }

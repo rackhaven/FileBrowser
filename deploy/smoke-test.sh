@@ -94,8 +94,8 @@ expect "health endpoint responds" "200" "$HTTP_CODE"
 req GET "$BASE/api/status"
 expect "status endpoint responds" "200" "$HTTP_CODE"
 case "$BODY" in
-  *'"version"'*) ok "status reports a version" ;;
-  *) bad "status reports a version" "$BODY" ;;
+  *'"needs_bootstrap"'*) ok "status reports whether setup is needed" ;;
+  *) bad "status reports whether setup is needed" "$BODY" ;;
 esac
 
 req GET "$BASE/"
