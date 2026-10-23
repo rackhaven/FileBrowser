@@ -105,9 +105,12 @@ func OpenStore(path string) (*Store, error) {
 
 // noteStat remembers the size and modtime of the database file as last seen.
 // Callers invoke it right after loading or right after a successful save, so
-// a change made by anyone else registers as new.
+// a change made by anyone else registers as new. It takes the store mutex
+// itself, so it must not be called while the mutex is held.
 func (s *Store) noteStat() {
 	info, err := os.Stat(s.path)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err != nil {
 		s.lastSize, s.lastMod = 0, time.Time{}
 		return
@@ -128,7 +131,10 @@ func (s *Store) reloadIfChanged() error {
 	case err != nil:
 		return fmt.Errorf("auth: stat %s: %w", s.path, err)
 	}
-	if info.Size() == s.lastSize && info.ModTime().Equal(s.lastMod) {
+	s.mu.RLock()
+	unchanged := info.Size() == s.lastSize && info.ModTime().Equal(s.lastMod)
+	s.mu.RUnlock()
+	if unchanged {
 		return nil
 	}
 	raw, err := os.ReadFile(s.path)
@@ -139,10 +145,12 @@ func (s *Store) reloadIfChanged() error {
 	if err := json.Unmarshal(raw, &fresh); err != nil {
 		return fmt.Errorf("auth: parse %s: %w", s.path, err)
 	}
-	s.db.Users = fresh.Users
-	for _, u := range s.db.Users {
+	for _, u := range fresh.Users {
 		u.Username = strings.ToLower(strings.TrimSpace(u.Username))
 	}
+	s.mu.Lock()
+	s.db.Users = fresh.Users
+	s.mu.Unlock()
 	s.noteStat()
 	return nil
 }
