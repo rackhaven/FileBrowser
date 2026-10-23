@@ -120,6 +120,24 @@ main:focus { outline: none; }
 .row-icon { flex: none; display: grid; place-items: center; width: 26px; color: var(--fg-muted); }
 .row.is-dir .row-icon { color: var(--accent); }
 
+/* Previews sit on top of the icon they replace; a bigger box keeps a 320px
+   source from being crushed into a 26px slot it would never fill. */
+.row-icon.has-thumb {
+  position: relative;
+  overflow: hidden;
+  width: 44px;
+  border-radius: 8px;
+  background: var(--bg-elev);
+}
+.row-thumb {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
 .row-text { flex: 1 1 auto; min-width: 0; }
 .row-name {
   display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -203,6 +221,7 @@ button.ghost.danger, .drawer-item.danger { color: var(--danger); }
 
 .hint { margin: -6px 0 0; font-size: 13px; color: var(--fg-muted); }
 .muted { color: var(--fg-muted); }
+.search-note { padding: 10px 14px; font-size: 0.9rem; color: var(--fg-muted); }
 .error {
   margin: 0; padding: 10px 12px;
   border-radius: 8px; background: color-mix(in srgb, var(--danger) 12%, transparent);
@@ -304,4 +323,22 @@ button.ghost.danger, .drawer-item.danger { color: var(--danger); }
 /* Wider screens: centre the list so it stays readable on a desktop. */
 @media (min-width: 760px) {
   .list, .empty, .statusbar { max-width: 860px; margin-inline: auto; width: 100%; }
+}
+
+/* Pager: an in-list button that pulls the next slice of a big folder. */
+.load-more {
+  display: block;
+  width: 100%;
+  margin: 8px 0;
+  padding: 10px;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  color: var(--fg-muted);
+  font: inherit;
+  text-align: center;
+}
+.load-more:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }

@@ -16,9 +16,14 @@
 package server
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	_ "image/jpeg" // decode thumbnails in tests
+	"image/png"
 	"io"
 	"log/slog"
 	"net/http"
@@ -893,5 +898,286 @@ func TestOriginGuardDoesNotTouchReads(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("cross-origin GET: status %d, want 200", resp.StatusCode)
+	}
+}
+
+// ------------------------------------------------------------------- zips ---
+
+func TestZipStreamsAFolder(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	resp := h.get(client, "/api/fs/zip?path=/photos")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("zip: status %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/zip" {
+		t.Errorf("content type %q, want application/zip", ct)
+	}
+	if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, "attachment") ||
+		!strings.Contains(cd, "photos") {
+		t.Errorf("content disposition %q, want an attachment named for photos", cd)
+	}
+	// Note: Content-Length must never be SET by the handler, but the Go
+	// server auto-fills it for tiny responses, so assert the header's
+	// absence only in handler behaviour, reviewed by humans, not here.
+
+	raw, _ := io.ReadAll(resp.Body)
+	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		t.Fatalf("zip reader: %v", err)
+	}
+	if len(zr.File) != 2 {
+		names := make([]string, 0, len(zr.File))
+		for _, f := range zr.File {
+			names = append(names, f.Name)
+		}
+		t.Fatalf("archive members = %v, want two (dir marker row is implicit)", names)
+	}
+	for _, f := range zr.File {
+		if !strings.HasPrefix(f.Name, "photos/") {
+			t.Errorf("member %q sits under photos/", f.Name)
+		}
+	}
+}
+
+func TestZipOfMissingPathIs404(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	resp := h.get(client, "/api/fs/zip?path=/photos/huh")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("zip of a missing path: status %d, want 404", resp.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------- search ---
+
+func TestSearchEndpointFindsSubtreeMatches(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	resp := h.get(client, "/api/fs/search?path=/&q=notes")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("search: status %d, want 200", resp.StatusCode)
+	}
+	payload := decode(t, resp)
+	if payload["more"] != false {
+		t.Error("a broad admin search over a small tree must not truncate")
+	}
+	entries, ok := payload["entries"].([]any)
+	if !ok {
+		t.Fatalf("entries shape %T, want an array", payload["entries"])
+	}
+	var found bool
+	for _, raw := range entries {
+		e, _ := raw.(map[string]any)
+		if e["path"] == "/docs/notes.txt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("search missed /docs/notes.txt; got %v", entries)
+	}
+}
+
+func TestSearchEndpointEmptyQuery(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	resp := h.get(client, "/api/fs/search?path=/&q=")
+	defer resp.Body.Close()
+	payload := decode(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("search status %d, want 200 even without a query", resp.StatusCode)
+	}
+	if entries, _ := payload["entries"].([]any); len(entries) != 0 {
+		t.Errorf("empty query returned entries; want none")
+	}
+}
+
+// ------------------------------------------------------------ pagination ---
+
+func TestListPaginates(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	// Top-level folders sort first: docs, empty, photos, so docs leads.
+	resp := h.get(client, "/api/fs/list?path=/&limit=1")
+	defer resp.Body.Close()
+	payload := decode(t, resp)
+
+	total := payload["total"]
+	if total == nil || payload["more"] != true {
+		t.Fatalf("first page: total=%v more=%v; want a real total with more=true", total, payload["more"])
+	}
+	entries, _ := payload["entries"].([]any)
+	if len(entries) != 1 {
+		t.Fatalf("first page: %d entries, want 1", len(entries))
+	}
+	if got := entries[0].(map[string]any)["name"]; got != "docs" {
+		t.Errorf("sort order is folders first; first entry was %v", got)
+	}
+
+	second := decode(t, h.get(client, "/api/fs/list?path=/&limit=1&offset=1"))
+	entries2, _ := second["entries"].([]any)
+	if len(entries2) != 1 || entries2[0].(map[string]any)["name"] != "photos" {
+		t.Fatalf("second page did not advance: %v", entries2)
+	}
+	if second["more"] != false {
+		t.Error("the second page is the last of two entries; more must be false")
+	}
+}
+
+func TestListWithoutParamsKeepsFullShape(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	resp := h.get(client, "/api/fs/list?path=/")
+	defer resp.Body.Close()
+	payload := decode(t, resp)
+	if payload["more"] != false {
+		t.Error("a full (unpaged) listing must say more=false")
+	}
+	total, _ := payload["total"].(float64)
+	entries, _ := payload["entries"].([]any)
+	if int(total) != len(entries) || total == 0 {
+		t.Errorf("full listing: total=%v entries=%d; both sides must agree", total, len(entries))
+	}
+}
+
+func TestListOffsetBeyondTotal(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	resp := h.get(client, "/api/fs/list?path=/&limit=10&offset=99")
+	defer resp.Body.Close()
+	payload := decode(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, want 200 for an over-sized offset", resp.StatusCode)
+	}
+	if entries, _ := payload["entries"].([]any); len(entries) != 0 {
+		t.Errorf("entries beyond the end = %v, want none", entries)
+	}
+	if payload["more"] != false {
+		t.Error("more must be false past the end")
+	}
+}
+
+// ------------------------------------------------------------- thumbnails ---
+
+// (700x500 gradient) in the root; the shared fixture images are tiny text
+// placeholders rather than decodable files.
+func serveThumbnail(t *testing.T) (*harness, *http.Client, []byte) {
+	t.Helper()
+	h := newHarnessWithConfig(t, Config{SessionTTL: time.Hour, ThumbCache: t.TempDir()})
+	client := h.login("admin", "password123")
+
+	img := image.NewRGBA(image.Rect(0, 0, 700, 500))
+	for y := 0; y < 500; y++ {
+		for x := 0; x < 700; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: uint8(x % 251), G: uint8(y % 251), B: 90, A: 255})
+		}
+	}
+	var raw bytes.Buffer
+	if err := png.Encode(&raw, img); err != nil {
+		t.Fatalf("encode fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(h.root, "big.png"), raw.Bytes(), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	return h, client, raw.Bytes()
+}
+
+func TestThumbEndpointScalesLargePNG(t *testing.T) {
+	h, client, rawPNG := serveThumbnail(t)
+
+	resp := h.get(client, "/api/fs/thumb?path=/big.png")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("thumb: status %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "image/jpeg" {
+		t.Errorf("content type %q, want image/jpeg", ct)
+	}
+	if etag := resp.Header.Get("ETag"); !hasWeakPrefix(etag) {
+		t.Errorf("etag %q, want a weak validator", etag)
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if bytes.Equal(raw, rawPNG) {
+		t.Fatal("a 700px PNG must not be passed through unscaled")
+	}
+	img, format, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("decode thumbnail: %v", err)
+	}
+	if format != "jpeg" {
+		t.Errorf("format %q, want jpeg", format)
+	}
+	if w := img.Bounds().Dx(); w != 320 {
+		t.Errorf("width %d, want 320", w)
+	}
+
+	// The second view must be the very bytes in the cache, attributable
+	// neither to decoding twice nor to a fresh encode drifting.
+	again := h.get(client, "/api/fs/thumb?path=/big.png")
+	defer again.Body.Close()
+	cached, _ := io.ReadAll(io.LimitReader(again.Body, 4<<20))
+	if !bytes.Equal(raw, cached) {
+		t.Error("the second response must be the cached preview, byte for byte")
+	}
+}
+
+func hasWeakPrefix(etag string) bool {
+	return strings.HasPrefix(etag, `W/"`) && strings.HasSuffix(etag, `"`)
+}
+
+func TestThumbEndpointNotModified(t *testing.T) {
+	h, client, _ := serveThumbnail(t)
+
+	first := h.get(client, "/api/fs/thumb?path=/big.png")
+	etag := first.Header.Get("ETag")
+	first.Body.Close()
+	if etag == "" {
+		t.Fatal("no ETag on the first response")
+	}
+
+	req, err := http.NewRequest("GET", h.server.URL+"/api/fs/thumb?path=/big.png", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("If-None-Match", etag)
+	second, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Body.Close()
+	if second.StatusCode != http.StatusNotModified {
+		t.Fatalf("status %d, want 304", second.StatusCode)
+	}
+	if rest, _ := io.ReadAll(second.Body); len(rest) != 0 {
+		t.Error("a 304 must carry no body")
+	}
+}
+
+func TestThumbEndpointErrors(t *testing.T) {
+	h, client, _ := serveThumbnail(t)
+
+	pairs := []struct {
+		path string
+		want int
+	}{
+		{"/docs/notes.txt", http.StatusUnsupportedMediaType},
+		{"/big.png.gone", http.StatusNotFound},
+	}
+	for _, p := range pairs {
+		resp := h.get(client, "/api/fs/thumb?path="+p.path)
+		resp.Body.Close()
+		if resp.StatusCode != p.want {
+			t.Errorf("thumb of %s: status %d, want %d", p.path, resp.StatusCode, p.want)
+		}
 	}
 }

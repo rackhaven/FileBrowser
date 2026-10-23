@@ -18,7 +18,13 @@ const API = {
   logout: () => req('POST', '/api/auth/logout', {}),
   changePassword: (b) => req('POST', '/api/auth/password', b),
   bootstrap: (b) => req('POST', '/api/auth/bootstrap', b),
-  list: (p) => req('GET', `/api/fs/list?path=${encodeURIComponent(p)}`),
+  list: (p, opts = {}) => {
+    let url = `/api/fs/list?path=${encodeURIComponent(p)}`;
+    if (opts.limit) url += `&limit=${opts.limit}`;
+    if (opts.offset) url += `&offset=${opts.offset}`;
+    return req('GET', url);
+  },
+  search: (p, q) => req('GET', `/api/fs/search?path=${encodeURIComponent(p)}&q=${encodeURIComponent(q)}`),
   usage: (p) => req('GET', `/api/fs/usage?path=${encodeURIComponent(p)}&depth=10`),
   mkdir: (b) => req('POST', '/api/fs/mkdir', b),
   rename: (b) => req('POST', '/api/fs/rename', b),
@@ -69,11 +75,20 @@ const state = {
   user: null,
   path: '/',
   entries: [],
+  total: 0,
+  more: false,
   parent: '',
   canWrite: false,
   selected: null,
   filter: '',
 };
+
+/**
+ * How many entries the server is asked for at once. Listings on phones are
+ * scrolling documents; three hundred rows render comfortably and keep the
+ * first folder snappy even with a photo library in it.
+ */
+const LIST_PAGE = 300;
 
 // ------------------------------------------------------------------ dom ---
 
@@ -276,6 +291,21 @@ function makeRow(entry) {
   const icon = document.createElement('span');
   icon.className = 'row-icon';
   icon.append(svgFor(iconFor(entry)));
+  if (!entry.is_dir && isPreviewable(entry.name)) {
+    // A real preview from the server, layered over its icon. Lazy loading
+    // keeps a folder of five hundred photos from firing five hundred
+    // requests at once, and a failed preview (or a 404 after a delete from
+    // another session) simply falls back to the icon underneath.
+    const img = document.createElement('img');
+    img.className = 'row-thumb';
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.alt = '';
+    img.addEventListener('error', () => img.remove());
+    img.src = `/api/fs/thumb?path=${encodeURIComponent(entry.path)}`;
+    icon.classList.add('has-thumb');
+    icon.append(img);
+  }
 
   const text = document.createElement('span');
   text.className = 'row-text';
@@ -321,6 +351,10 @@ function renderList() {
 
   const frag = document.createDocumentFragment();
   for (const entry of items) frag.append(makeRow(entry));
+
+  if (state.more && !state.filter) {
+    frag.append(loadMoreRow());
+  }
   el.list.replaceChildren(frag);
 
   const nothing = items.length === 0;
@@ -331,11 +365,52 @@ function renderList() {
 
   const dirs = items.filter((e) => e.is_dir).length;
   const files = items.length - dirs;
-  el.count.textContent = state.filter
-    ? `${items.length} shown`
-    : `${dirs} folder${dirs === 1 ? '' : 's'}, ${files} file${files === 1 ? '' : 's'}`;
+  let count;
+  if (state.filter) {
+    count = `${items.length} shown`;
+  } else if (state.more) {
+    count = `${state.entries.length} of ${state.total} shown`;
+  } else {
+    count = `${dirs} folder${dirs === 1 ? '' : 's'}, ${files} file${files === 1 ? '' : 's'}`;
+  }
+  el.count.textContent = count;
 
   state.selected = null;
+}
+
+/**
+ * One more page from the server, appended to what is on screen. The list
+ * grows in place so the browser keeps the user's scroll position instead of
+ * jumping to the top of a reloaded folder.
+ */
+async function loadMore() {
+  try {
+    const data = await API.list(state.path, { offset: state.entries.length, limit: LIST_PAGE });
+    state.entries = state.entries.concat(data.entries || []);
+    state.total = data.total ?? state.total;
+    state.more = !!data.more;
+    renderList();
+  } catch (err) {
+    if (err.status === 401) return showLogin();
+    toast(err.message, 'err');
+  }
+}
+
+function loadMoreRow() {
+  const hidden = Math.max(0, state.total - state.entries.length);
+  const b = document.createElement('button');
+  b.className = 'load-more';
+  b.textContent = `Show more (${hidden} hidden)`;
+  b.addEventListener('click', loadMore);
+  return b;
+}
+
+/**
+ * True for the image types the server can shrink into a preview. Everything
+ * else keeps its icon; there is no point fetching a 415.
+ */
+function isPreviewable(name) {
+  return /\.(jpe?g|png|gif)$/i.test(name || '');
 }
 
 async function refreshQuota() {
@@ -366,13 +441,16 @@ function currentPath() {
 
 async function navigate(path, { push = true } = {}) {
   try {
-    const data = await API.list(path || '/');
+    const data = await API.list(path || '/', { limit: LIST_PAGE });
     state.path = data.path;
     state.entries = data.entries || [];
     state.parent = data.parent || '';
     state.canWrite = !!data.can_write;
+    state.total = data.total ?? state.entries.length;
+    state.more = !!data.more;
     state.filter = '';
     $('search-input').value = '';
+    $('search-results').replaceChildren();
 
     renderCrumbs(state.path);
     renderList();
@@ -419,6 +497,27 @@ function startDownload(entry, { inline = false } = {}) {
   a.remove();
 
   toast(inline ? `Opening ${entry.name}` : `Downloading ${entry.name}`);
+}
+
+// ----------------------------------------------------------------- zips ---
+
+/**
+ * Stream a whole folder as a zip archive.
+ *
+ * Same hand-off to the browser as single-file downloads: a real anchor lets
+ * the browser stream it, which matters for folders holding gigabytes. The
+ * server names the archive, which is why the anchor's download slot is left
+ * empty rather than set here.
+ */
+function startZip() {
+  const url = `/api/fs/zip?path=${encodeURIComponent(state.path)}`;
+  const a = document.createElement('a');
+  a.href = url;
+  a.rel = 'noopener';
+  document.body.append(a);
+  a.click();
+  a.remove();
+  toast('Preparing a zip of this folder');
 }
 
 // ----------------------------------------------------------------- taps ---
@@ -624,6 +723,62 @@ async function doMkdir() {
 function onSearchInput() {
   state.filter = $('search-input').value.trim().toLowerCase();
   renderList();
+  updateSearchResults();
+}
+
+/**
+ * Server search over everything below the current folder.
+ *
+ * The input always narrows the current listing too, but that only reaches one
+ * level deep, so the drawer additionally shows what the server found further
+ * down. Results overwrite each other based on a sequence number, so a slow
+ * earlier answer cannot clobber a newer one.
+ */
+let searchSeq = 0;
+async function updateSearchResults() {
+  const q = $('search-input').value.trim();
+  const seq = ++searchSeq;
+  const box = $('search-results');
+
+  if (q.length < 2) {
+    box.replaceChildren();
+    box.append(searchNote('Type two characters or more to search down '
+      + 'through every subfolder.'));
+    return;
+  }
+
+  try {
+    const data = await API.search(state.path, q);
+    if (seq !== searchSeq || q !== $('search-input').value.trim()) return; // stale
+
+    box.replaceChildren();
+    if (data.entries.length === 0) {
+      box.append(searchNote(`Nothing below ${state.path} matches “${data.query}”.`));
+    } else {
+      for (const entry of data.entries) {
+        const row = makeRow(entry);
+        // Tapping a result leaves the drawer so the target is visible.
+        row.addEventListener('click', () => { closePanels(); });
+        box.append(row);
+      }
+      if (data.more) {
+        box.append(searchNote(`Stopped at ${data.entries.length} results; `
+          + 'try a more specific term.'));
+      }
+    }
+  } catch (err) {
+    if (seq !== searchSeq) return;
+    if (err.status === 401) return showLogin();
+    box.replaceChildren();
+    box.append(searchNote(err.message));
+  }
+}
+
+function searchNote(text) {
+  const d = document.createElement('div');
+  d.className = 'search-note';
+  d.textContent = text;
+  return d;
 }
 
 // ---------------------------------------------------------- user admin ---
@@ -928,6 +1083,7 @@ function wire() {
   $('btn-search').addEventListener('click', () => {
     openPanel(el.searchpane);
     $('search-input').focus();
+    updateSearchResults();
   });
   el.scrim.addEventListener('click', closePanels);
   $('menu-close').addEventListener('click', closePanels);
@@ -944,6 +1100,10 @@ function wire() {
   $('mi-up').addEventListener('click', () => {
     closePanels();
     if (state.parent) navigate(state.parent);
+  });
+  $('mi-zip').addEventListener('click', () => {
+    closePanels();
+    startZip();
   });
   $('mi-mkdir').addEventListener('click', () => { closePanels(); doMkdir(); });
   $('mi-logout').addEventListener('click', doLogout);

@@ -42,6 +42,8 @@ func (s *Server) writeFSError(w http.ResponseWriter, r *http.Request, err error)
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, fs.ErrNotDir):
 		writeError(w, http.StatusBadRequest, "expected a file")
+	case errors.Is(err, fs.ErrNotImage):
+		writeError(w, http.StatusUnsupportedMediaType, "that file is not an image the server can preview")
 	case errors.Is(err, os.ErrNotExist):
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, os.ErrPermission):
@@ -54,6 +56,29 @@ func (s *Server) writeFSError(w http.ResponseWriter, r *http.Request, err error)
 	}
 }
 
+// maxListPage caps the limit parameter, so a hostile offset cannot be turned
+// into an unbounded response by naming a huge limit.
+const maxListPage = 1000
+
+// listWindow reads the optional offset and limit parameters. Without a limit
+// the full listing is returned, which keeps the old response shape for every
+// existing caller.
+func listWindow(r *http.Request) (offset, limit int) {
+	q := r.URL.Query()
+	offset, _ = strconv.Atoi(q.Get("offset"))
+	limit, _ = strconv.Atoi(q.Get("limit"))
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		return 0, 0
+	}
+	if limit > maxListPage {
+		limit = maxListPage
+	}
+	return offset, limit
+}
+
 // handleList returns the entries of a directory.
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
@@ -64,11 +89,32 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		s.writeFSError(w, r, err)
 		return
 	}
+
+	total := len(entries)
+	page := entries
+	offset, limit := listWindow(r)
+	more := false
+	if limit > 0 {
+		if offset < total {
+			page = entries[offset:]
+		} else {
+			page = nil
+		}
+		if len(page) > limit {
+			page = page[:limit]
+			more = true
+		}
+	} else {
+		offset = 0
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"path":      fs.Clean(vpath),
 		"parent":    parentOf(fs.Clean(vpath), u),
-		"entries":   entries,
+		"entries":   page,
 		"can_write": u.EffectiveLevel(fs.Clean(vpath)) >= auth.AccessWrite,
+		"total":     total,
+		"more":      more,
 	})
 }
 
@@ -339,9 +385,89 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, usage)
 }
 
+// handleSearch looks for names below a folder. The authority line mirrors
+// the listing: only what the user may see is returned, so names are not an
+// enumeration oracle for hidden files.
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	q := r.URL.Query()
+
+	found, err := s.files.Search(u, q.Get("path"), q.Get("q"))
+	if err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"path":    fs.Clean(q.Get("path")),
+		"query":   strings.TrimSpace(strings.ToLower(q.Get("q"))),
+		"entries": found.Entries,
+		"more":    found.More,
+	})
+}
+
+// handleThumb returns a small preview of an image file, or a 304 for a
+// client that already holds the current version.
+//
+// Previews are derived data, so the browser may keep one for a day while the
+// weak ETag still lets it revalidate after a file changes.
+func (s *Server) handleThumb(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	vpath := r.URL.Query().Get("path")
+
+	thumb, err := s.files.Thumbnail(u, vpath)
+	if err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+
+	// Weak: the exact bytes of a re-encoded preview are not promised across
+	// processes; what matters is that a fresh view of an unchanged file is
+	// an acceptable substitute for the bytes already held.
+	etag := `W/"` + strconv.FormatInt(thumb.ModTime.UnixNano(), 16) + `"`
+	if r.Header.Get("If-None-Match") == etag {
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", "private, max-age=86400")
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	w.Header().Set("Content-Type", thumb.ContentType)
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	w.Header().Set("ETag", etag)
+	_, _ = w.Write(thumb.Data)
+}
+
+// handleZip streams a folder as a zip archive. Streaming keeps memory flat,
+// so no Content-Length is set: the archive's final size is not knowable in
+// advance, which is also why the name comes from fs.ZipInfo so header and
+// archive agree before any body bytes are sent.
+func (s *Server) handleZip(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	vpath := r.URL.Query().Get("path")
+
+	name, err := s.files.ZipInfo(u, vpath)
+	if err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", contentDisposition(name+".zip", false))
+	// A folder of live files must never sit in a shared proxy cache; every
+	// request walks afresh so renames and deletes are reflected immediately.
+	w.Header().Set("Cache-Control", "private, no-store")
+
+	if err := s.files.Zip(u, vpath, w); err != nil {
+		// Headers may already be committed, so the only useful move is to cut
+		// the stream rather than append a JSON error to a binary body.
+		s.logError("zip failed", "path", fs.Clean(vpath), "err", err)
+		return
+	}
+	s.logf("zip", "user", u.Username, "path", fs.Clean(vpath))
+}
+
 // handleHealth is for uptime checks and the Docker HEALTHCHECK.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintln(w, "ok")
 }

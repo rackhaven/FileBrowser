@@ -38,8 +38,11 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/fs/list", s.requireAuth(s.handleList))
 	mux.HandleFunc("GET /api/fs/info", s.requireAuth(s.handleInfo))
+	mux.HandleFunc("GET /api/fs/thumb", s.requireAuth(s.handleThumb))
+	mux.HandleFunc("GET /api/fs/search", s.requireAuth(s.handleSearch))
 	mux.HandleFunc("GET /api/fs/download", s.requireAuth(s.handleDownload))
 	mux.HandleFunc("HEAD /api/fs/download", s.requireAuth(s.handleDownload))
+	mux.HandleFunc("GET /api/fs/zip", s.requireAuth(s.handleZip))
 	mux.HandleFunc("GET /api/fs/usage", s.requireAuth(s.handleUsage))
 	mux.HandleFunc("PUT /api/fs/upload", s.requireAuth(s.handleUpload))
 	mux.HandleFunc("POST /api/fs/mkdir", s.requireAuth(s.handleMkdir))

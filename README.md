@@ -277,6 +277,7 @@ file.
 |                | `FB_SESSION_TTL`       | `168h`         | how long a sign-in lasts            |
 |                | `FB_TRUST_PROXY_HEADERS` | `false`      | honour `X-Forwarded-Proto` and `X-Forwarded-For` |
 |                | `FB_MAX_UPLOAD_BYTES`  | `34359738368`  | largest upload, in bytes            |
+|                | `FB_THUMB_CACHE`       | `/data/thumbs` | where generated image previews live |
 |                | `FB_TLS_CERT`/`FB_TLS_KEY` | —         | terminate TLS here instead          |
 |                | `FB_LOG_LEVEL`         | `info`         | `debug`, `info`, `warn`, `error`    |
 |                | `FB_ADMIN_USER`        | `admin`        | first-run account name              |
@@ -359,6 +360,12 @@ Consequences worth knowing:
 - The browser owns the download, so its own UI shows progress and retry.
 - Images and PDFs open inline instead of downloading, since the browser can
   display them.
+- A whole folder can come down as one zip: use "Download this folder as zip"
+  in the menu. The archive streams with constant memory, contains only entries
+  the signed-in user may read, and skips symlinks and unfinished uploads.
+- Search in the magnifier drawer runs on the server and reaches everything
+  below the folder you are in, stopping at 300 results; the query box in the
+  main pane still narrows the current folder as you type.
 
 Uploads use `XMLHttpRequest` rather than `fetch`, purely because it is the only
 way to report progress.
@@ -436,9 +443,12 @@ noted.
 
 | Method | Path | |
 | --- | --- | --- |
-| `GET` | `/api/fs/list?path=/` | entries the user may see |
+| `GET` | `/api/fs/list?path=/` | entries the user may see; add `limit=` and `offset=` to page through big folders |
+| `GET` | `/api/fs/search?path=/&q=term` | name matches below `path`, capped at 300, ACL-filtered |
 | `GET` | `/api/fs/info?path=/a.txt` | one entry |
+| `GET` | `/api/fs/thumb?path=/a.jpg` | small preview; weak `ETag`, so revalidation happens for free |
 | `GET`/`HEAD` | `/api/fs/download?path=/a.txt` | stream; supports `Range`, `?inline=1` |
+| `GET` | `/api/fs/zip?path=/docs` | whole folder as a zip, streamed; same ACL rules as listings |
 | `PUT` | `/api/fs/upload?path=/dir&name=f.txt` | raw body streamed to disk |
 | `POST` | `/api/fs/mkdir` | `{path, name}` |
 | `POST` | `/api/fs/rename` | `{from, to_dir, new_name}` |

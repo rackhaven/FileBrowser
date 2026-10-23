@@ -47,6 +47,10 @@ type Config struct {
 	// MaxUploadBytes caps an upload request body. Zero falls back to the
 	// server default so a caller that forgets the field stays safe.
 	MaxUploadBytes int64
+	// ThumbCache points at the generated-preview directory; empty disables
+	// thumbnails. A path that cannot be created only demotes thumbnails to
+	// the uncacheable path, it never takes the server down.
+	ThumbCache string
 }
 
 // defaultMaxUpload is used whenever no usable cap is supplied. It is the
@@ -98,6 +102,12 @@ func New(opt Options) *Server {
 	uploadMax := opt.Config.MaxUploadBytes
 	if uploadMax <= 0 {
 		uploadMax = defaultMaxUpload
+	}
+	if opt.FS != nil && opt.Config.ThumbCache != "" {
+		if err := opt.FS.SetThumbCache(opt.Config.ThumbCache); err != nil {
+			logger.Warn("thumbnail cache unavailable; previews regenerate on each request",
+				"err", err)
+		}
 	}
 	return &Server{
 		cfg:       opt.Config,
