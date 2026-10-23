@@ -19,6 +19,7 @@ const API = {
   changePassword: (b) => req('POST', '/api/auth/password', b),
   bootstrap: (b) => req('POST', '/api/auth/bootstrap', b),
   list: (p) => req('GET', `/api/fs/list?path=${encodeURIComponent(p)}`),
+  search: (p, q) => req('GET', `/api/fs/search?path=${encodeURIComponent(p)}&q=${encodeURIComponent(q)}`),
   usage: (p) => req('GET', `/api/fs/usage?path=${encodeURIComponent(p)}&depth=10`),
   mkdir: (b) => req('POST', '/api/fs/mkdir', b),
   rename: (b) => req('POST', '/api/fs/rename', b),
@@ -373,6 +374,7 @@ async function navigate(path, { push = true } = {}) {
     state.canWrite = !!data.can_write;
     state.filter = '';
     $('search-input').value = '';
+    $('search-results').replaceChildren();
 
     renderCrumbs(state.path);
     renderList();
@@ -645,6 +647,62 @@ async function doMkdir() {
 function onSearchInput() {
   state.filter = $('search-input').value.trim().toLowerCase();
   renderList();
+  updateSearchResults();
+}
+
+/**
+ * Server search over everything below the current folder.
+ *
+ * The input always narrows the current listing too, but that only reaches one
+ * level deep, so the drawer additionally shows what the server found further
+ * down. Results overwrite each other based on a sequence number, so a slow
+ * earlier answer cannot clobber a newer one.
+ */
+let searchSeq = 0;
+async function updateSearchResults() {
+  const q = $('search-input').value.trim();
+  const seq = ++searchSeq;
+  const box = $('search-results');
+
+  if (q.length < 2) {
+    box.replaceChildren();
+    box.append(searchNote('Type two characters or more to search down '
+      + 'through every subfolder.'));
+    return;
+  }
+
+  try {
+    const data = await API.search(state.path, q);
+    if (seq !== searchSeq || q !== $('search-input').value.trim()) return; // stale
+
+    box.replaceChildren();
+    if (data.entries.length === 0) {
+      box.append(searchNote(`Nothing below ${state.path} matches “${data.query}”.`));
+    } else {
+      for (const entry of data.entries) {
+        const row = makeRow(entry);
+        // Tapping a result leaves the drawer so the target is visible.
+        row.addEventListener('click', () => { closePanels(); });
+        box.append(row);
+      }
+      if (data.more) {
+        box.append(searchNote(`Stopped at ${data.entries.length} results; `
+          + 'try a more specific term.'));
+      }
+    }
+  } catch (err) {
+    if (seq !== searchSeq) return;
+    if (err.status === 401) return showLogin();
+    box.replaceChildren();
+    box.append(searchNote(err.message));
+  }
+}
+
+function searchNote(text) {
+  const d = document.createElement('div');
+  d.className = 'search-note';
+  d.textContent = text;
+  return d;
 }
 
 // ---------------------------------------------------------- user admin ---
@@ -949,6 +1007,7 @@ function wire() {
   $('btn-search').addEventListener('click', () => {
     openPanel(el.searchpane);
     $('search-input').focus();
+    updateSearchResults();
   });
   el.scrim.addEventListener('click', closePanels);
   $('menu-close').addEventListener('click', closePanels);

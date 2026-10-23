@@ -339,6 +339,26 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, usage)
 }
 
+// handleSearch looks for names below a folder. The authority line mirrors
+// the listing: only what the user may see is returned, so names are not an
+// enumeration oracle for hidden files.
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	q := r.URL.Query()
+
+	found, err := s.files.Search(u, q.Get("path"), q.Get("q"))
+	if err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"path":    fs.Clean(q.Get("path")),
+		"query":   strings.TrimSpace(strings.ToLower(q.Get("q"))),
+		"entries": found.Entries,
+		"more":    found.More,
+	})
+}
+
 // handleZip streams a folder as a zip archive. Streaming keeps memory flat,
 // so no Content-Length is set: the archive's final size is not knowable in
 // advance, which is also why the name comes from fs.ZipInfo so header and

@@ -948,3 +948,49 @@ func TestZipOfMissingPathIs404(t *testing.T) {
 		t.Fatalf("zip of a missing path: status %d, want 404", resp.StatusCode)
 	}
 }
+
+// ---------------------------------------------------------------- search ---
+
+func TestSearchEndpointFindsSubtreeMatches(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	resp := h.get(client, "/api/fs/search?path=/&q=notes")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("search: status %d, want 200", resp.StatusCode)
+	}
+	payload := decode(t, resp)
+	if payload["more"] != false {
+		t.Error("a broad admin search over a small tree must not truncate")
+	}
+	entries, ok := payload["entries"].([]any)
+	if !ok {
+		t.Fatalf("entries shape %T, want an array", payload["entries"])
+	}
+	var found bool
+	for _, raw := range entries {
+		e, _ := raw.(map[string]any)
+		if e["path"] == "/docs/notes.txt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("search missed /docs/notes.txt; got %v", entries)
+	}
+}
+
+func TestSearchEndpointEmptyQuery(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	resp := h.get(client, "/api/fs/search?path=/&q=")
+	defer resp.Body.Close()
+	payload := decode(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("search status %d, want 200 even without a query", resp.StatusCode)
+	}
+	if entries, _ := payload["entries"].([]any); len(entries) != 0 {
+		t.Errorf("empty query returned entries; want none")
+	}
+}

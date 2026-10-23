@@ -203,6 +203,7 @@ button.ghost.danger, .drawer-item.danger { color: var(--danger); }
 
 .hint { margin: -6px 0 0; font-size: 13px; color: var(--fg-muted); }
 .muted { color: var(--fg-muted); }
+.search-note { padding: 10px 14px; font-size: 0.9rem; color: var(--fg-muted); }
 .error {
   margin: 0; padding: 10px 12px;
   border-radius: 8px; background: color-mix(in srgb, var(--danger) 12%, transparent);
