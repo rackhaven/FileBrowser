@@ -105,12 +105,20 @@ func OpenStore(path string) (*Store, error) {
 
 // noteStat remembers the size and modtime of the database file as last seen.
 // Callers invoke it right after loading or right after a successful save, so
-// a change made by anyone else registers as new. It takes the store mutex
-// itself, so it must not be called while the mutex is held.
+// a change made by anyone else registers as new.
+//
+// The stat and the recording happen under the store mutex. Stating first and
+// locking second would leave a window where another goroutine's save lands
+// in between and the recorded stamp describes a file we never read.
 func (s *Store) noteStat() {
-	info, err := os.Stat(s.path)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.noteStatLocked()
+}
+
+// noteStatLocked is noteStat for callers already holding the mutex.
+func (s *Store) noteStatLocked() {
+	info, err := os.Stat(s.path)
 	if err != nil {
 		s.lastSize, s.lastMod = 0, time.Time{}
 		return
@@ -122,6 +130,12 @@ func (s *Store) noteStat() {
 // reloadIfChanged replaces the in-memory database when another process wrote
 // the file since we last read or wrote it. The caller must hold the
 // cross-process lock, which closes the window between read and save.
+//
+// The read and the replacement happen under the store mutex. They must be
+// one critical section: flock serialises them only across processes (it is
+// per file description, so it never blocks another goroutine of this same
+// process), and an unlocked replace would wipe a commit that another
+// goroutine of this process had just saved between our read and our swap.
 func (s *Store) reloadIfChanged() error {
 	info, err := os.Stat(s.path)
 	switch {
@@ -137,21 +151,31 @@ func (s *Store) reloadIfChanged() error {
 	if unchanged {
 		return nil
 	}
-	raw, err := os.ReadFile(s.path)
-	if err != nil {
-		return fmt.Errorf("auth: read %s: %w", s.path, err)
-	}
-	fresh := database{Version: dbVersion}
-	if err := json.Unmarshal(raw, &fresh); err != nil {
-		return fmt.Errorf("auth: parse %s: %w", s.path, err)
-	}
-	for _, u := range fresh.Users {
-		u.Username = strings.ToLower(strings.TrimSpace(u.Username))
-	}
+
 	s.mu.Lock()
-	s.db.Users = fresh.Users
-	s.mu.Unlock()
-	s.noteStat()
+	defer s.mu.Unlock()
+	// Double-check: the file may have changed again while we waited.
+	if info.Size() == s.lastSize && info.ModTime().Equal(s.lastMod) {
+		return nil
+	}
+	raw, rerr := os.ReadFile(s.path)
+	if rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+		return fmt.Errorf("auth: read %s: %w", s.path, rerr)
+	}
+	if rerr == nil {
+		fresh := database{Version: dbVersion}
+		if jerr := json.Unmarshal(raw, &fresh); jerr != nil {
+			return fmt.Errorf("auth: parse %s: %w", s.path, jerr)
+		}
+		for _, u := range fresh.Users {
+			u.Username = strings.ToLower(strings.TrimSpace(u.Username))
+		}
+		s.db.Users = fresh.Users
+	}
+	// Stamp what is on disk now. If the file moved on between the read and
+	// this stat, the next accessor sees the difference and reloads once
+	// more; convergence, not loss.
+	s.noteStatLocked()
 	return nil
 }
 
