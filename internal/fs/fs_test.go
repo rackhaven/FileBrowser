@@ -21,7 +21,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/lennox/filebrowser/internal/auth"
+	"github.com/rackhaven/filebrowser/internal/auth"
 )
 
 func newTestFS(t *testing.T) *FS {

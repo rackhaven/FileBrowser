@@ -38,3 +38,9 @@ session_ttl: 168h   # 7 days
 # would let an attacker set the header themselves, though the cookie is still
 # HttpOnly and SameSite=Strict either way.
 trust_proxy_headers: false
+
+# --- Uploads -----------------------------------------------------------------
+# Largest accepted upload, in bytes. The body streams to disk, so this guards
+# space rather than memory. Defaults to 32 GiB (34359738368).
+#
+# max_upload_bytes: 34359738368

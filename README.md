@@ -269,6 +269,7 @@ file.
 | `-config`       | —                      | —              | YAML config file                    |
 |                | `FB_SESSION_TTL`       | `168h`         | how long a sign-in lasts            |
 |                | `FB_TRUST_PROXY_HEADERS` | `false`      | honour `X-Forwarded-Proto`          |
+|                | `FB_MAX_UPLOAD_BYTES`  | `34359738368`  | largest upload, in bytes            |
 |                | `FB_TLS_CERT`/`FB_TLS_KEY` | —         | terminate TLS here instead          |
 |                | `FB_LOG_LEVEL`         | `info`         | `debug`, `info`, `warn`, `error`    |
 |                | `FB_ADMIN_USER`        | `admin`        | first-run account name              |

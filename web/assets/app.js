@@ -643,7 +643,8 @@ function textToGrants(text) {
     if (idx <= 0) throw new Error(`Line “${line}” needs a path and a level.`);
     const path = line.slice(0, idx).trim();
     const level = line.slice(idx + 1).trim().toLowerCase();
-    if (!level.startsWith('/')) throw new Error(`“${level}” is not a valid level.`);
+    if (!['read', 'write', 'admin'].includes(level))
+      throw new Error(`“${level}” is not a valid level. Levels: read, write, admin.`);
     if (path[0] !== '/') throw new Error(`Grant paths must start with /.`);
     grants.push({ path, level });
   }

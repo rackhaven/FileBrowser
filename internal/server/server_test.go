@@ -31,8 +31,8 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/lennox/filebrowser/internal/auth"
-	bfs "github.com/lennox/filebrowser/internal/fs"
+	"github.com/rackhaven/filebrowser/internal/auth"
+	bfs "github.com/rackhaven/filebrowser/internal/fs"
 )
 
 // ------------------------------------------------------------ harness -----

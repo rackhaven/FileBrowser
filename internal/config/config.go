@@ -47,6 +47,9 @@ type Config struct {
 	// TrustProxyHeaders honours X-Forwarded-Proto when deciding whether to
 	// set the Secure cookie attribute. Only enable behind a proxy you control.
 	TrustProxyHeaders bool `yaml:"trust_proxy_headers"`
+	// MaxUploadBytes is the largest accepted upload, in bytes. The body is
+	// streamed to disk, so the cap protects space rather than memory.
+	MaxUploadBytes int64 `yaml:"max_upload_bytes"`
 	// AllowSignup is intentionally not supported: accounts are created by an
 	// admin so the service can never be self-serve on a public network.
 }
@@ -58,6 +61,9 @@ func Default() Config {
 		Root:       "/srv/files",
 		DataDir:    "/data",
 		SessionTTL: 7 * 24 * time.Hour,
+		// 32 GiB. Generous, but a cap: a hostile client must not be able to
+		// fill the disk through uploads alone.
+		MaxUploadBytes: 32 << 30,
 	}
 }
 
@@ -82,6 +88,7 @@ func Load(path string) (Config, error) {
 	envStr("FB_TLS_CERT", &cfg.TLSCert)
 	envStr("FB_TLS_KEY", &cfg.TLSKey)
 	envBool("FB_TRUST_PROXY_HEADERS", &cfg.TrustProxyHeaders)
+	envInt64("FB_MAX_UPLOAD_BYTES", &cfg.MaxUploadBytes)
 
 	if v, ok := os.LookupEnv("FB_SESSION_TTL"); ok {
 		d, err := time.ParseDuration(v)
@@ -102,6 +109,9 @@ func Load(path string) (Config, error) {
 	}
 	if (cfg.TLSCert == "") != (cfg.TLSKey == "") {
 		return cfg, fmt.Errorf("tls_cert and tls_key must be set together")
+	}
+	if cfg.MaxUploadBytes <= 0 {
+		return cfg, fmt.Errorf("max_upload_bytes must be a positive number of bytes")
 	}
 
 	cfg.Root = filepath.Clean(cfg.Root)
@@ -125,4 +135,16 @@ func envBool(key string, dst *bool) {
 		return // ignore malformed values rather than crashing on a typo
 	}
 	*dst = b
+}
+
+func envInt64(key string, dst *int64) {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+	if err != nil {
+		return // ignore malformed values rather than crashing on a typo
+	}
+	*dst = n
 }

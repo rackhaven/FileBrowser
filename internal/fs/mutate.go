@@ -22,7 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/lennox/filebrowser/internal/auth"
+	"github.com/rackhaven/filebrowser/internal/auth"
 )
 
 // Mkdir creates a directory inside dir, which must be writable by the user.
