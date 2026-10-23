@@ -291,6 +291,21 @@ function makeRow(entry) {
   const icon = document.createElement('span');
   icon.className = 'row-icon';
   icon.append(svgFor(iconFor(entry)));
+  if (!entry.is_dir && isPreviewable(entry.name)) {
+    // A real preview from the server, layered over its icon. Lazy loading
+    // keeps a folder of five hundred photos from firing five hundred
+    // requests at once, and a failed preview (or a 404 after a delete from
+    // another session) simply falls back to the icon underneath.
+    const img = document.createElement('img');
+    img.className = 'row-thumb';
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.alt = '';
+    img.addEventListener('error', () => img.remove());
+    img.src = `/api/fs/thumb?path=${encodeURIComponent(entry.path)}`;
+    icon.classList.add('has-thumb');
+    icon.append(img);
+  }
 
   const text = document.createElement('span');
   text.className = 'row-text';
@@ -388,6 +403,14 @@ function loadMoreRow() {
   b.textContent = `Show more (${hidden} hidden)`;
   b.addEventListener('click', loadMore);
   return b;
+}
+
+/**
+ * True for the image types the server can shrink into a preview. Everything
+ * else keeps its icon; there is no point fetching a 415.
+ */
+function isPreviewable(name) {
+  return /\.(jpe?g|png|gif)$/i.test(name || '');
 }
 
 async function refreshQuota() {

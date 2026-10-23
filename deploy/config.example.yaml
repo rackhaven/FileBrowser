@@ -44,3 +44,9 @@ trust_proxy_headers: false
 # space rather than memory. Defaults to 32 GiB (34359738368).
 #
 # max_upload_bytes: 34359738368
+
+# --- Thumbnails --------------------------------------------------------------
+# Where generated image previews are stored. Defaults to "thumbs" inside the
+# data directory. Derived data only: deleting the folder is always safe.
+#
+# thumb_cache: /data/thumbs

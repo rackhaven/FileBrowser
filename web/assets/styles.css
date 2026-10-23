@@ -120,6 +120,24 @@ main:focus { outline: none; }
 .row-icon { flex: none; display: grid; place-items: center; width: 26px; color: var(--fg-muted); }
 .row.is-dir .row-icon { color: var(--accent); }
 
+/* Previews sit on top of the icon they replace; a bigger box keeps a 320px
+   source from being crushed into a 26px slot it would never fill. */
+.row-icon.has-thumb {
+  position: relative;
+  overflow: hidden;
+  width: 44px;
+  border-radius: 8px;
+  background: var(--bg-elev);
+}
+.row-thumb {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
 .row-text { flex: 1 1 auto; min-width: 0; }
 .row-name {
   display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

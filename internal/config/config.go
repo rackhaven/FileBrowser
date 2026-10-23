@@ -50,6 +50,9 @@ type Config struct {
 	// MaxUploadBytes is the largest accepted upload, in bytes. The body is
 	// streamed to disk, so the cap protects space rather than memory.
 	MaxUploadBytes int64 `yaml:"max_upload_bytes"`
+	// ThumbCache is where generated image previews live. Empty falls back
+	// to a folder inside DataDir; set FB_THUMB_CACHE to relocate it.
+	ThumbCache string `yaml:"thumb_cache"`
 	// AllowSignup is intentionally not supported: accounts are created by an
 	// admin so the service can never be self-serve on a public network.
 }
@@ -85,6 +88,7 @@ func Load(path string) (Config, error) {
 	envStr("FB_LISTEN", &cfg.Listen)
 	envStr("FB_ROOT", &cfg.Root)
 	envStr("FB_DATA_DIR", &cfg.DataDir)
+	envStr("FB_THUMB_CACHE", &cfg.ThumbCache)
 	envStr("FB_TLS_CERT", &cfg.TLSCert)
 	envStr("FB_TLS_KEY", &cfg.TLSKey)
 	envBool("FB_TRUST_PROXY_HEADERS", &cfg.TrustProxyHeaders)
@@ -116,6 +120,12 @@ func Load(path string) (Config, error) {
 
 	cfg.Root = filepath.Clean(cfg.Root)
 	cfg.DataDir = filepath.Clean(cfg.DataDir)
+	// The preview cache defaults to living beside the user database: it is
+	// derived data, safe to delete, so it should not be sibling to anything
+	// a user might mistake for content.
+	if cfg.ThumbCache == "" {
+		cfg.ThumbCache = filepath.Join(cfg.DataDir, "thumbs")
+	}
 	return cfg, nil
 }
 

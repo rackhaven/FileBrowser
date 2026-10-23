@@ -163,6 +163,7 @@ func runServe(args []string) error {
 			TrustProxyHeaders: cfg.TrustProxyHeaders,
 			SessionTTL:        cfg.SessionTTL,
 			MaxUploadBytes:    cfg.MaxUploadBytes,
+			ThumbCache:        cfg.ThumbCache,
 		},
 		Users:    store,
 		Sessions: sessions,

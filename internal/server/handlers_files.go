@@ -42,6 +42,8 @@ func (s *Server) writeFSError(w http.ResponseWriter, r *http.Request, err error)
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, fs.ErrNotDir):
 		writeError(w, http.StatusBadRequest, "expected a file")
+	case errors.Is(err, fs.ErrNotImage):
+		writeError(w, http.StatusUnsupportedMediaType, "that file is not an image the server can preview")
 	case errors.Is(err, os.ErrNotExist):
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, os.ErrPermission):
@@ -401,6 +403,38 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		"entries": found.Entries,
 		"more":    found.More,
 	})
+}
+
+// handleThumb returns a small preview of an image file, or a 304 for a
+// client that already holds the current version.
+//
+// Previews are derived data, so the browser may keep one for a day while the
+// weak ETag still lets it revalidate after a file changes.
+func (s *Server) handleThumb(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	vpath := r.URL.Query().Get("path")
+
+	thumb, err := s.files.Thumbnail(u, vpath)
+	if err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+
+	// Weak: the exact bytes of a re-encoded preview are not promised across
+	// processes; what matters is that a fresh view of an unchanged file is
+	// an acceptable substitute for the bytes already held.
+	etag := `W/"` + strconv.FormatInt(thumb.ModTime.UnixNano(), 16) + `"`
+	if r.Header.Get("If-None-Match") == etag {
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", "private, max-age=86400")
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	w.Header().Set("Content-Type", thumb.ContentType)
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	w.Header().Set("ETag", etag)
+	_, _ = w.Write(thumb.Data)
 }
 
 // handleZip streams a folder as a zip archive. Streaming keeps memory flat,

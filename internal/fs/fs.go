@@ -67,6 +67,9 @@ type FS struct {
 	// realRoot is root with symlinks resolved, used for containment checks.
 	// Comparing against this means a symlinked root does not break checks.
 	realRoot string
+	// thumbCache is the directory generated previews are stored in, or ""
+	// when no cache is configured ( Thumbnail still works, just slower).
+	thumbCache string
 }
 
 // New creates an FS rooted at dir. The directory is created if missing.

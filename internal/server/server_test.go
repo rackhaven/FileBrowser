@@ -20,6 +20,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	_ "image/jpeg" // decode thumbnails in tests
+	"image/png"
 	"io"
 	"log/slog"
 	"net/http"
@@ -1060,5 +1064,120 @@ func TestListOffsetBeyondTotal(t *testing.T) {
 	}
 	if payload["more"] != false {
 		t.Error("more must be false past the end")
+	}
+}
+
+// ------------------------------------------------------------- thumbnails ---
+
+// (700x500 gradient) in the root; the shared fixture images are tiny text
+// placeholders rather than decodable files.
+func serveThumbnail(t *testing.T) (*harness, *http.Client, []byte) {
+	t.Helper()
+	h := newHarnessWithConfig(t, Config{SessionTTL: time.Hour, ThumbCache: t.TempDir()})
+	client := h.login("admin", "password123")
+
+	img := image.NewRGBA(image.Rect(0, 0, 700, 500))
+	for y := 0; y < 500; y++ {
+		for x := 0; x < 700; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: uint8(x % 251), G: uint8(y % 251), B: 90, A: 255})
+		}
+	}
+	var raw bytes.Buffer
+	if err := png.Encode(&raw, img); err != nil {
+		t.Fatalf("encode fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(h.root, "big.png"), raw.Bytes(), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	return h, client, raw.Bytes()
+}
+
+func TestThumbEndpointScalesLargePNG(t *testing.T) {
+	h, client, rawPNG := serveThumbnail(t)
+
+	resp := h.get(client, "/api/fs/thumb?path=/big.png")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("thumb: status %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "image/jpeg" {
+		t.Errorf("content type %q, want image/jpeg", ct)
+	}
+	if etag := resp.Header.Get("ETag"); !hasWeakPrefix(etag) {
+		t.Errorf("etag %q, want a weak validator", etag)
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if bytes.Equal(raw, rawPNG) {
+		t.Fatal("a 700px PNG must not be passed through unscaled")
+	}
+	img, format, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("decode thumbnail: %v", err)
+	}
+	if format != "jpeg" {
+		t.Errorf("format %q, want jpeg", format)
+	}
+	if w := img.Bounds().Dx(); w != 320 {
+		t.Errorf("width %d, want 320", w)
+	}
+
+	// The second view must be the very bytes in the cache, attributable
+	// neither to decoding twice nor to a fresh encode drifting.
+	again := h.get(client, "/api/fs/thumb?path=/big.png")
+	defer again.Body.Close()
+	cached, _ := io.ReadAll(io.LimitReader(again.Body, 4<<20))
+	if !bytes.Equal(raw, cached) {
+		t.Error("the second response must be the cached preview, byte for byte")
+	}
+}
+
+func hasWeakPrefix(etag string) bool {
+	return strings.HasPrefix(etag, `W/"`) && strings.HasSuffix(etag, `"`)
+}
+
+func TestThumbEndpointNotModified(t *testing.T) {
+	h, client, _ := serveThumbnail(t)
+
+	first := h.get(client, "/api/fs/thumb?path=/big.png")
+	etag := first.Header.Get("ETag")
+	first.Body.Close()
+	if etag == "" {
+		t.Fatal("no ETag on the first response")
+	}
+
+	req, err := http.NewRequest("GET", h.server.URL+"/api/fs/thumb?path=/big.png", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("If-None-Match", etag)
+	second, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Body.Close()
+	if second.StatusCode != http.StatusNotModified {
+		t.Fatalf("status %d, want 304", second.StatusCode)
+	}
+	if rest, _ := io.ReadAll(second.Body); len(rest) != 0 {
+		t.Error("a 304 must carry no body")
+	}
+}
+
+func TestThumbEndpointErrors(t *testing.T) {
+	h, client, _ := serveThumbnail(t)
+
+	pairs := []struct {
+		path string
+		want int
+	}{
+		{"/docs/notes.txt", http.StatusUnsupportedMediaType},
+		{"/big.png.gone", http.StatusNotFound},
+	}
+	for _, p := range pairs {
+		resp := h.get(client, "/api/fs/thumb?path="+p.path)
+		resp.Body.Close()
+		if resp.StatusCode != p.want {
+			t.Errorf("thumb of %s: status %d, want %d", p.path, resp.StatusCode, p.want)
+		}
 	}
 }
