@@ -306,3 +306,21 @@ button.ghost.danger, .drawer-item.danger { color: var(--danger); }
 @media (min-width: 760px) {
   .list, .empty, .statusbar { max-width: 860px; margin-inline: auto; width: 100%; }
 }
+
+/* Pager: an in-list button that pulls the next slice of a big folder. */
+.load-more {
+  display: block;
+  width: 100%;
+  margin: 8px 0;
+  padding: 10px;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  color: var(--fg-muted);
+  font: inherit;
+  text-align: center;
+}
+.load-more:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}

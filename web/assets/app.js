@@ -18,7 +18,12 @@ const API = {
   logout: () => req('POST', '/api/auth/logout', {}),
   changePassword: (b) => req('POST', '/api/auth/password', b),
   bootstrap: (b) => req('POST', '/api/auth/bootstrap', b),
-  list: (p) => req('GET', `/api/fs/list?path=${encodeURIComponent(p)}`),
+  list: (p, opts = {}) => {
+    let url = `/api/fs/list?path=${encodeURIComponent(p)}`;
+    if (opts.limit) url += `&limit=${opts.limit}`;
+    if (opts.offset) url += `&offset=${opts.offset}`;
+    return req('GET', url);
+  },
   search: (p, q) => req('GET', `/api/fs/search?path=${encodeURIComponent(p)}&q=${encodeURIComponent(q)}`),
   usage: (p) => req('GET', `/api/fs/usage?path=${encodeURIComponent(p)}&depth=10`),
   mkdir: (b) => req('POST', '/api/fs/mkdir', b),
@@ -70,11 +75,20 @@ const state = {
   user: null,
   path: '/',
   entries: [],
+  total: 0,
+  more: false,
   parent: '',
   canWrite: false,
   selected: null,
   filter: '',
 };
+
+/**
+ * How many entries the server is asked for at once. Listings on phones are
+ * scrolling documents; three hundred rows render comfortably and keep the
+ * first folder snappy even with a photo library in it.
+ */
+const LIST_PAGE = 300;
 
 // ------------------------------------------------------------------ dom ---
 
@@ -322,6 +336,10 @@ function renderList() {
 
   const frag = document.createDocumentFragment();
   for (const entry of items) frag.append(makeRow(entry));
+
+  if (state.more && !state.filter) {
+    frag.append(loadMoreRow());
+  }
   el.list.replaceChildren(frag);
 
   const nothing = items.length === 0;
@@ -332,11 +350,44 @@ function renderList() {
 
   const dirs = items.filter((e) => e.is_dir).length;
   const files = items.length - dirs;
-  el.count.textContent = state.filter
-    ? `${items.length} shown`
-    : `${dirs} folder${dirs === 1 ? '' : 's'}, ${files} file${files === 1 ? '' : 's'}`;
+  let count;
+  if (state.filter) {
+    count = `${items.length} shown`;
+  } else if (state.more) {
+    count = `${state.entries.length} of ${state.total} shown`;
+  } else {
+    count = `${dirs} folder${dirs === 1 ? '' : 's'}, ${files} file${files === 1 ? '' : 's'}`;
+  }
+  el.count.textContent = count;
 
   state.selected = null;
+}
+
+/**
+ * One more page from the server, appended to what is on screen. The list
+ * grows in place so the browser keeps the user's scroll position instead of
+ * jumping to the top of a reloaded folder.
+ */
+async function loadMore() {
+  try {
+    const data = await API.list(state.path, { offset: state.entries.length, limit: LIST_PAGE });
+    state.entries = state.entries.concat(data.entries || []);
+    state.total = data.total ?? state.total;
+    state.more = !!data.more;
+    renderList();
+  } catch (err) {
+    if (err.status === 401) return showLogin();
+    toast(err.message, 'err');
+  }
+}
+
+function loadMoreRow() {
+  const hidden = Math.max(0, state.total - state.entries.length);
+  const b = document.createElement('button');
+  b.className = 'load-more';
+  b.textContent = `Show more (${hidden} hidden)`;
+  b.addEventListener('click', loadMore);
+  return b;
 }
 
 async function refreshQuota() {
@@ -367,11 +418,13 @@ function currentPath() {
 
 async function navigate(path, { push = true } = {}) {
   try {
-    const data = await API.list(path || '/');
+    const data = await API.list(path || '/', { limit: LIST_PAGE });
     state.path = data.path;
     state.entries = data.entries || [];
     state.parent = data.parent || '';
     state.canWrite = !!data.can_write;
+    state.total = data.total ?? state.entries.length;
+    state.more = !!data.more;
     state.filter = '';
     $('search-input').value = '';
     $('search-results').replaceChildren();

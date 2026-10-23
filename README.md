@@ -442,7 +442,7 @@ noted.
 
 | Method | Path | |
 | --- | --- | --- |
-| `GET` | `/api/fs/list?path=/` | entries the user may see |
+| `GET` | `/api/fs/list?path=/` | entries the user may see; add `limit=` and `offset=` to page through big folders |
 | `GET` | `/api/fs/search?path=/&q=term` | name matches below `path`, capped at 300, ACL-filtered |
 | `GET` | `/api/fs/info?path=/a.txt` | one entry |
 | `GET`/`HEAD` | `/api/fs/download?path=/a.txt` | stream; supports `Range`, `?inline=1` |

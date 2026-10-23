@@ -54,6 +54,29 @@ func (s *Server) writeFSError(w http.ResponseWriter, r *http.Request, err error)
 	}
 }
 
+// maxListPage caps the limit parameter, so a hostile offset cannot be turned
+// into an unbounded response by naming a huge limit.
+const maxListPage = 1000
+
+// listWindow reads the optional offset and limit parameters. Without a limit
+// the full listing is returned, which keeps the old response shape for every
+// existing caller.
+func listWindow(r *http.Request) (offset, limit int) {
+	q := r.URL.Query()
+	offset, _ = strconv.Atoi(q.Get("offset"))
+	limit, _ = strconv.Atoi(q.Get("limit"))
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		return 0, 0
+	}
+	if limit > maxListPage {
+		limit = maxListPage
+	}
+	return offset, limit
+}
+
 // handleList returns the entries of a directory.
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
@@ -64,11 +87,32 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		s.writeFSError(w, r, err)
 		return
 	}
+
+	total := len(entries)
+	page := entries
+	offset, limit := listWindow(r)
+	more := false
+	if limit > 0 {
+		if offset < total {
+			page = entries[offset:]
+		} else {
+			page = nil
+		}
+		if len(page) > limit {
+			page = page[:limit]
+			more = true
+		}
+	} else {
+		offset = 0
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"path":      fs.Clean(vpath),
 		"parent":    parentOf(fs.Clean(vpath), u),
-		"entries":   entries,
+		"entries":   page,
 		"can_write": u.EffectiveLevel(fs.Clean(vpath)) >= auth.AccessWrite,
+		"total":     total,
+		"more":      more,
 	})
 }
 

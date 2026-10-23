@@ -994,3 +994,71 @@ func TestSearchEndpointEmptyQuery(t *testing.T) {
 		t.Errorf("empty query returned entries; want none")
 	}
 }
+
+// ------------------------------------------------------------ pagination ---
+
+func TestListPaginates(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	// Top-level folders sort first: docs, empty, photos, so docs leads.
+	resp := h.get(client, "/api/fs/list?path=/&limit=1")
+	defer resp.Body.Close()
+	payload := decode(t, resp)
+
+	total := payload["total"]
+	if total == nil || payload["more"] != true {
+		t.Fatalf("first page: total=%v more=%v; want a real total with more=true", total, payload["more"])
+	}
+	entries, _ := payload["entries"].([]any)
+	if len(entries) != 1 {
+		t.Fatalf("first page: %d entries, want 1", len(entries))
+	}
+	if got := entries[0].(map[string]any)["name"]; got != "docs" {
+		t.Errorf("sort order is folders first; first entry was %v", got)
+	}
+
+	second := decode(t, h.get(client, "/api/fs/list?path=/&limit=1&offset=1"))
+	entries2, _ := second["entries"].([]any)
+	if len(entries2) != 1 || entries2[0].(map[string]any)["name"] != "photos" {
+		t.Fatalf("second page did not advance: %v", entries2)
+	}
+	if second["more"] != false {
+		t.Error("the second page is the last of two entries; more must be false")
+	}
+}
+
+func TestListWithoutParamsKeepsFullShape(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	resp := h.get(client, "/api/fs/list?path=/")
+	defer resp.Body.Close()
+	payload := decode(t, resp)
+	if payload["more"] != false {
+		t.Error("a full (unpaged) listing must say more=false")
+	}
+	total, _ := payload["total"].(float64)
+	entries, _ := payload["entries"].([]any)
+	if int(total) != len(entries) || total == 0 {
+		t.Errorf("full listing: total=%v entries=%d; both sides must agree", total, len(entries))
+	}
+}
+
+func TestListOffsetBeyondTotal(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	resp := h.get(client, "/api/fs/list?path=/&limit=10&offset=99")
+	defer resp.Body.Close()
+	payload := decode(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, want 200 for an over-sized offset", resp.StatusCode)
+	}
+	if entries, _ := payload["entries"].([]any); len(entries) != 0 {
+		t.Errorf("entries beyond the end = %v, want none", entries)
+	}
+	if payload["more"] != false {
+		t.Error("more must be false past the end")
+	}
+}
