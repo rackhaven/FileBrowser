@@ -421,6 +421,27 @@ function startDownload(entry, { inline = false } = {}) {
   toast(inline ? `Opening ${entry.name}` : `Downloading ${entry.name}`);
 }
 
+// ----------------------------------------------------------------- zips ---
+
+/**
+ * Stream a whole folder as a zip archive.
+ *
+ * Same hand-off to the browser as single-file downloads: a real anchor lets
+ * the browser stream it, which matters for folders holding gigabytes. The
+ * server names the archive, which is why the anchor's download slot is left
+ * empty rather than set here.
+ */
+function startZip() {
+  const url = `/api/fs/zip?path=${encodeURIComponent(state.path)}`;
+  const a = document.createElement('a');
+  a.href = url;
+  a.rel = 'noopener';
+  document.body.append(a);
+  a.click();
+  a.remove();
+  toast('Preparing a zip of this folder');
+}
+
 // ----------------------------------------------------------------- taps ---
 
 function onEntryTap(entry, row) {
@@ -944,6 +965,10 @@ function wire() {
   $('mi-up').addEventListener('click', () => {
     closePanels();
     if (state.parent) navigate(state.parent);
+  });
+  $('mi-zip').addEventListener('click', () => {
+    closePanels();
+    startZip();
   });
   $('mi-mkdir').addEventListener('click', () => { closePanels(); doMkdir(); });
   $('mi-logout').addEventListener('click', doLogout);

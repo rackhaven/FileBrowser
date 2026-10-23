@@ -359,6 +359,9 @@ Consequences worth knowing:
 - The browser owns the download, so its own UI shows progress and retry.
 - Images and PDFs open inline instead of downloading, since the browser can
   display them.
+- A whole folder can come down as one zip: use "Download this folder as zip"
+  in the menu. The archive streams with constant memory, contains only entries
+  the signed-in user may read, and skips symlinks and unfinished uploads.
 
 Uploads use `XMLHttpRequest` rather than `fetch`, purely because it is the only
 way to report progress.
@@ -439,6 +442,7 @@ noted.
 | `GET` | `/api/fs/list?path=/` | entries the user may see |
 | `GET` | `/api/fs/info?path=/a.txt` | one entry |
 | `GET`/`HEAD` | `/api/fs/download?path=/a.txt` | stream; supports `Range`, `?inline=1` |
+| `GET` | `/api/fs/zip?path=/docs` | whole folder as a zip, streamed; same ACL rules as listings |
 | `PUT` | `/api/fs/upload?path=/dir&name=f.txt` | raw body streamed to disk |
 | `POST` | `/api/fs/mkdir` | `{path, name}` |
 | `POST` | `/api/fs/rename` | `{from, to_dir, new_name}` |

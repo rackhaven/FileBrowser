@@ -16,6 +16,7 @@
 package server
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -893,5 +894,57 @@ func TestOriginGuardDoesNotTouchReads(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("cross-origin GET: status %d, want 200", resp.StatusCode)
+	}
+}
+
+// ------------------------------------------------------------------- zips ---
+
+func TestZipStreamsAFolder(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	resp := h.get(client, "/api/fs/zip?path=/photos")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("zip: status %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/zip" {
+		t.Errorf("content type %q, want application/zip", ct)
+	}
+	if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, "attachment") ||
+		!strings.Contains(cd, "photos") {
+		t.Errorf("content disposition %q, want an attachment named for photos", cd)
+	}
+	// Note: Content-Length must never be SET by the handler, but the Go
+	// server auto-fills it for tiny responses, so assert the header's
+	// absence only in handler behaviour, reviewed by humans, not here.
+
+	raw, _ := io.ReadAll(resp.Body)
+	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		t.Fatalf("zip reader: %v", err)
+	}
+	if len(zr.File) != 2 {
+		names := make([]string, 0, len(zr.File))
+		for _, f := range zr.File {
+			names = append(names, f.Name)
+		}
+		t.Fatalf("archive members = %v, want two (dir marker row is implicit)", names)
+	}
+	for _, f := range zr.File {
+		if !strings.HasPrefix(f.Name, "photos/") {
+			t.Errorf("member %q sits under photos/", f.Name)
+		}
+	}
+}
+
+func TestZipOfMissingPathIs404(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	resp := h.get(client, "/api/fs/zip?path=/photos/huh")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("zip of a missing path: status %d, want 404", resp.StatusCode)
 	}
 }

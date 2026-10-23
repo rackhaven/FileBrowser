@@ -339,9 +339,37 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, usage)
 }
 
+// handleZip streams a folder as a zip archive. Streaming keeps memory flat,
+// so no Content-Length is set: the archive's final size is not knowable in
+// advance, which is also why the name comes from fs.ZipInfo so header and
+// archive agree before any body bytes are sent.
+func (s *Server) handleZip(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	vpath := r.URL.Query().Get("path")
+
+	name, err := s.files.ZipInfo(u, vpath)
+	if err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", contentDisposition(name+".zip", false))
+	// A folder of live files must never sit in a shared proxy cache; every
+	// request walks afresh so renames and deletes are reflected immediately.
+	w.Header().Set("Cache-Control", "private, no-store")
+
+	if err := s.files.Zip(u, vpath, w); err != nil {
+		// Headers may already be committed, so the only useful move is to cut
+		// the stream rather than append a JSON error to a binary body.
+		s.logError("zip failed", "path", fs.Clean(vpath), "err", err)
+		return
+	}
+	s.logf("zip", "user", u.Username, "path", fs.Clean(vpath))
+}
+
 // handleHealth is for uptime checks and the Docker HEALTHCHECK.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintln(w, "ok")
 }
