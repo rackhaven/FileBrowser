@@ -32,7 +32,7 @@ func (f *FS) Mkdir(u *auth.User, dir, name string) (Entry, error) {
 	if err != nil {
 		return Entry{}, err
 	}
-	if isUploadTempName(name) {
+	if isReservedName(name) {
 		return Entry{}, ErrReserved
 	}
 	real, err := f.Resolve(u, dir, auth.AccessWrite)
@@ -74,7 +74,7 @@ func (f *FS) UploadTarget(u *auth.User, dir, name string) (real, vpath string, e
 	if err != nil {
 		return "", "", err
 	}
-	if isUploadTempName(name) {
+	if isReservedName(name) {
 		return "", "", ErrReserved
 	}
 	realDir, err := f.Resolve(u, dir, auth.AccessWrite)
@@ -92,11 +92,13 @@ func (f *FS) UploadTarget(u *auth.User, dir, name string) (real, vpath string, e
 	return target, vpath, nil
 }
 
-// Remove deletes a file or (recursively) a directory. Write access on the
-// entry itself is required.
+// Remove deletes a file or (recursively) a directory: really, it moves the
+// entry into the reserved .trash directory with a record of where it came
+// from, so accidental deletes are undoable (see RestoreTrash). Write access
+// on the entry itself is required.
 func (f *FS) Remove(u *auth.User, vpath string) error {
 	vp := Clean(vpath)
-	if isUploadTempName(path.Base(vp)) {
+	if isReservedName(path.Base(vp)) {
 		return ErrReserved
 	}
 	real, err := f.Resolve(u, vp, auth.AccessWrite)
@@ -106,7 +108,7 @@ func (f *FS) Remove(u *auth.User, vpath string) error {
 	if real == f.realRoot {
 		return fmt.Errorf("fs: refusing to delete the root directory")
 	}
-	return os.RemoveAll(real)
+	return f.moveToTrash(u, real, vp)
 }
 
 // Rename moves an entry. Write access is required on both the source and the
@@ -114,10 +116,10 @@ func (f *FS) Remove(u *auth.User, vpath string) error {
 // even see.
 func (f *FS) Rename(u *auth.User, from, toDir, newName string) (Entry, error) {
 	fromVP := Clean(from)
-	if isUploadTempName(path.Base(fromVP)) {
+	if isReservedName(path.Base(fromVP)) {
 		return Entry{}, ErrReserved
 	}
-	if isUploadTempName(newName) {
+	if isReservedName(newName) {
 		return Entry{}, ErrReserved
 	}
 	src, err := f.Resolve(u, fromVP, auth.AccessWrite)
@@ -195,6 +197,14 @@ func (f *FS) Usage(u *auth.User, vpath string, maxDepth int) (Usage, error) {
 	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// Deleted items live in the trash and reserved names are machinery,
+		// not content: neither belongs in usage numbers.
+		if isReservedName(d.Name()) {
+			if d.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil

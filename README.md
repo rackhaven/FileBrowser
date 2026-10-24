@@ -135,6 +135,14 @@ Rules on a narrower path still let a user reach a deep folder: someone with
 only `/photos/private` can still open `/photos` to get there, they just see
 nothing else. The UI marks those intermediate folders so it is not confusing.
 
+**Deletes go to a trash, not off the disk.** Removing a file or folder moves it
+into a reserved `.trash` directory with a record of where it came from, who
+deleted it and when. **Menu → Deleted items** lists what you can act on:
+anything you deleted, or anything deleted from a folder you can write to, with
+**Restore** and **Erase** per item. Rescue a whole subtree later: restoring
+recreates any folders that went with it. Erasing every item at once is an
+administrator action, and nothing in the trash survives being erased.
+
 **Administrators cannot remove, disable or demote the last remaining
 administrator**, so you cannot lock yourself out.
 
@@ -452,7 +460,10 @@ noted.
 | `PUT` | `/api/fs/upload?path=/dir&name=f.txt` | raw body streamed to disk |
 | `POST` | `/api/fs/mkdir` | `{path, name}` |
 | `POST` | `/api/fs/rename` | `{from, to_dir, new_name}` |
-| `POST` | `/api/fs/delete?path=/a.txt` | recursive for folders |
+| `POST` | `/api/fs/delete?path=/a.txt` | recursive for folders; the entry moves to the trash, see below |
+| `GET` | `/api/fs/trash` | deleted items the caller may act on, `{entries}` |
+| `POST` | `/api/fs/restore` | `{name}`; put a trashed entry back where it came from |
+| `DELETE` | `/api/fs/trash?name=` | erase one trashed entry; with no `name`, admin-only wipe of the whole trash |
 | `GET` | `/api/fs/usage?path=/&depth=8` | `{files, dirs, bytes}` |
 
 **Admin** — all require an administrator.

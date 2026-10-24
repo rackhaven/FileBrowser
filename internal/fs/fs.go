@@ -280,8 +280,9 @@ func (f *FS) List(u *auth.User, vpath string) ([]Entry, error) {
 
 		// Temporary upload files are not listings material: they exist for
 		// the seconds between the upload body arriving and the rename into
-		// place, and another viewer shouldn't see (or race) them.
-		if isUploadTempName(name) {
+		// place, and another viewer shouldn't see (or race) them. The trash
+		// is reserved for the same reason: it is machinery, not content.
+		if isReservedName(name) {
 			continue
 		}
 

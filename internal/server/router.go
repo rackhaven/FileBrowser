@@ -48,6 +48,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/fs/mkdir", s.requireAuth(s.handleMkdir))
 	mux.HandleFunc("POST /api/fs/delete", s.requireAuth(s.handleDelete))
 	mux.HandleFunc("POST /api/fs/rename", s.requireAuth(s.handleRename))
+	mux.HandleFunc("GET /api/fs/trash", s.requireAuth(s.handleTrashList))
+	mux.HandleFunc("POST /api/fs/restore", s.requireAuth(s.handleRestore))
+	mux.HandleFunc("DELETE /api/fs/trash", s.requireAuth(s.handleTrashDelete))
 
 	// ---- admin -----------------------------------------------------------
 	mux.HandleFunc("GET /api/admin/users", s.requireAdmin(s.handleListUsers))

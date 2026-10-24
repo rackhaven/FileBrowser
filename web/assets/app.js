@@ -29,6 +29,10 @@ const API = {
   mkdir: (b) => req('POST', '/api/fs/mkdir', b),
   rename: (b) => req('POST', '/api/fs/rename', b),
   remove: (p) => req('POST', `/api/fs/delete?path=${encodeURIComponent(p)}`, {}),
+  trash: () => req('GET', '/api/fs/trash'),
+  restore: (name) => req('POST', '/api/fs/restore', { name }),
+  trashDelete: (name) => req('DELETE', `/api/fs/trash?name=${encodeURIComponent(name)}`),
+  trashEmpty: () => req('DELETE', '/api/fs/trash', {}),
   users: () => req('GET', '/api/admin/users'),
   createUser: (b) => req('POST', '/api/admin/users', b),
   updateUser: (id, b) => req('PATCH', `/api/admin/users/${encodeURIComponent(id)}`, b),
@@ -99,7 +103,7 @@ const el = {
   crumbs: $('crumbs'), list: $('list'), empty: $('empty'),
   count: $('status-count'), quota: $('status-quota'), fab: $('btn-fab'),
   scrim: $('scrim'), menu: $('menu'), admin: $('admin'), searchpane: $('searchpane'),
-  sheet: $('sheet'), detail: $('detail'), toasts: $('toasts'),
+  trashpane: $('trashpane'), sheet: $('sheet'), detail: $('detail'), toasts: $('toasts'),
 };
 
 // ----------------------------------------------------------- formatting ---
@@ -197,6 +201,7 @@ function openPanel(node) {
   el.menu.hidden = true;
   el.admin.hidden = true;
   el.searchpane.hidden = true;
+  el.trashpane.hidden = true;
   node.hidden = false;
   el.scrim.hidden = false;
 }
@@ -205,6 +210,7 @@ function closePanels() {
   el.menu.hidden = true;
   el.admin.hidden = true;
   el.searchpane.hidden = true;
+  el.trashpane.hidden = true;
   el.scrim.hidden = true;
 }
 
@@ -520,7 +526,100 @@ function startZip() {
   toast('Preparing a zip of this folder');
 }
 
-// ----------------------------------------------------------------- taps ---
+// ---------------------------------------------------------------- trash ---
+
+/**
+ * The deleted-items drawer. Entries are server-filtered: an admin sees
+ * everything, everyone else only what they may restore, so the rows carry
+ * every action their viewer is entitled to use.
+ */
+async function renderTrash() {
+  const box = $('trash-rows');
+  try {
+    const data = await API.trash();
+    const entries = data.entries || [];
+    $('trash-empty').hidden = entries.length === 0;
+
+    if (entries.length === 0) {
+      box.replaceChildren(trashNote('Nothing deleted. Deleting sends items here, not off the disk.'));
+      return;
+    }
+
+    const frag = document.createDocumentFragment();
+    for (const e of entries) frag.append(trashRow(e));
+    box.replaceChildren(frag);
+  } catch (err) {
+    if (err.status === 401) return showLogin();
+    box.replaceChildren(trashNote(err.message));
+  }
+}
+
+function trashRow(entry) {
+  const row = document.createElement('div');
+  row.className = 'trash-row';
+
+  const name = document.createElement('span');
+  name.className = 'trash-name';
+  name.textContent = entry.original_path || entry.name;
+  name.title = entry.original_path || entry.name;
+
+  const meta = document.createElement('span');
+  meta.className = 'trash-sub';
+  const when = formatDate(entry.deleted_at);
+  meta.textContent = entry.deleted_by ? `${when}, deleted by ${entry.deleted_by}` : when;
+
+  const restore = document.createElement('button');
+  restore.className = 'mini-btn';
+  restore.textContent = entry.can_restore ? 'Restore' : 'Denied';
+  if (entry.can_restore) {
+    restore.addEventListener('click', async () => {
+      try {
+        await API.restore(entry.name);
+        renderTrash();
+        if (state.user) navigate(state.path, { push: false });
+        toast('Restored');
+      } catch (err) {
+        if (err.status === 401) return showLogin();
+        toast(err.message, 'err');
+      }
+    });
+  } else {
+    restore.disabled = true;
+  }
+
+  const shred = document.createElement('button');
+  shred.className = 'trash-erase';
+  shred.textContent = 'Erase';
+  shred.addEventListener('click', async () => {
+    if (!confirm(`Erase ${entry.original_path || entry.name} for good?`)) return;
+    try {
+      await API.trashDelete(entry.name);
+      renderTrash();
+      toast('Erased for good');
+    } catch (err) {
+      if (err.status === 401) return showLogin();
+      toast(err.message, 'err');
+    }
+  });
+
+  const text = document.createElement('span');
+  text.className = 'trash-text';
+  text.append(name, meta);
+  row.append(text, restore, shred);
+  return row;
+}
+
+function trashNote(text) {
+  const d = document.createElement('div');
+  d.className = 'trash-note';
+  d.textContent = text;
+  return d;
+}
+
+/**
+ * Deleting an entry re-lists the folder, since what vanished now lives in
+ * the trash. The trash drawer itself is only opened deliberately.
+ */
 
 function onEntryTap(entry, row) {
   if (entry.is_dir) {
@@ -1104,6 +1203,22 @@ function wire() {
   $('mi-zip').addEventListener('click', () => {
     closePanels();
     startZip();
+  });
+  $('mi-trash').addEventListener('click', () => {
+    openPanel(el.trashpane);
+    renderTrash();
+  });
+  $('trash-close').addEventListener('click', closePanels);
+  $('trash-empty').addEventListener('click', async () => {
+    if (!confirm('Erase every deleted item for everyone? This cannot be undone.')) return;
+    try {
+      await API.trashEmpty();
+      renderTrash();
+      toast('Trash emptied');
+    } catch (err) {
+      if (err.status === 401) return showLogin();
+      toast(err.message, 'err');
+    }
   });
   $('mi-mkdir').addEventListener('click', () => { closePanels(); doMkdir(); });
   $('mi-logout').addEventListener('click', doLogout);

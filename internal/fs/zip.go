@@ -82,7 +82,7 @@ func (f *FS) Zip(u *auth.User, vpath string, w io.Writer) error {
 		for _, de := range des {
 			name := de.Name()
 
-			if isUploadTempName(name) {
+			if isReservedName(name) {
 				continue
 			}
 			childVP, jerr := Join(vDir, name)

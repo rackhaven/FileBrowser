@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -192,6 +193,21 @@ func decode(t *testing.T, resp *http.Response) map[string]any {
 		t.Fatalf("decode: %v", err)
 	}
 	return out
+}
+
+// delQuery issues a DELETE with an arbitrary path and query string, using the
+// given client's session cookie.
+func (h *harness) delQuery(client *http.Client, target string) *http.Response {
+	h.t.Helper()
+	req, err := http.NewRequest(http.MethodDelete, h.server.URL+target, nil)
+	if err != nil {
+		h.t.Fatalf("DELETE %s: %v", target, err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		h.t.Fatalf("DELETE %s: %v", target, err)
+	}
+	return resp
 }
 
 // --------------------------------------------------------------- tests ----
@@ -1179,5 +1195,117 @@ func TestThumbEndpointErrors(t *testing.T) {
 		if resp.StatusCode != p.want {
 			t.Errorf("thumb of %s: status %d, want %d", p.path, resp.StatusCode, p.want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------- trash ---
+
+func TestTrashLifecycle(t *testing.T) {
+	h := newHarness(t)
+	admin := h.login("admin", "password123")
+
+	// The ordinary delete endpoint moves into the trash.
+	resp := h.post(admin, "/api/fs/delete?path=/docs/notes.txt", `{}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete: status %d", resp.StatusCode)
+	}
+	if _, err := os.Stat(filepath.Join(h.root, "docs", "notes.txt")); !os.IsNotExist(err) {
+		t.Fatalf("source still on disk: %v", err)
+	}
+
+	// The trash lists it with the record fields the drawer renders.
+	list := decode(t, h.get(admin, "/api/fs/trash"))
+	entries, ok := list["entries"].([]any)
+	if !ok || len(entries) != 1 {
+		t.Fatalf("trash = %v, want one entry", list["entries"])
+	}
+	entry := entries[0].(map[string]any)
+	if entry["original_path"] != "/docs/notes.txt" || entry["deleted_by"] != "admin" || entry["can_restore"] != true {
+		t.Fatalf("entry = %v", entry)
+	}
+	name, _ := entry["name"].(string)
+	if name == "" || entry["deleted_at"] == "" {
+		t.Fatalf("entry name or time missing: %v", entry)
+	}
+
+	// Restore puts the bytes back where they came from.
+	resp = h.post(admin, "/api/fs/restore", fmt.Sprintf(`{"name":%q}`, name))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("restore: status %d", resp.StatusCode)
+	}
+	raw, err := os.ReadFile(filepath.Join(h.root, "docs", "notes.txt"))
+	if err != nil || string(raw) != "secret notes" {
+		t.Fatalf("restored file: %q err %v", raw, err)
+	}
+	list = decode(t, h.get(admin, "/api/fs/trash"))
+	if got := len(list["entries"].([]any)); got != 0 {
+		t.Fatalf("trash after restore holds %d", got)
+	}
+}
+
+func TestTrashEraseAndPurgePerms(t *testing.T) {
+	h := newHarness(t)
+	admin := h.login("admin", "password123")
+
+	// A second user with no grants: not admin, cannot see restorable
+	// entries, cannot purge.
+	if _, err := h.users.Create("erin", "password123", false, nil); err != nil {
+		t.Fatalf("create erin: %v", err)
+	}
+	erin := h.login("erin", "password123")
+
+	resp := h.post(admin, "/api/fs/delete?path=/photos/b.png", `{}`)
+	resp.Body.Close()
+	resp = h.post(admin, "/api/fs/delete?path=/photos/2024/a.jpg", `{}`)
+	resp.Body.Close()
+
+	// Erin's list hides the entries (no write anywhere to restore them to).
+	list := decode(t, h.get(erin, "/api/fs/trash"))
+	if got := len(list["entries"].([]any)); got != 0 {
+		t.Fatalf("erin sees %d trash entries, want none", got)
+	}
+
+	// Purge without a name is the whole-trash wipe: admins only.
+	resp = h.delQuery(erin, "/api/fs/trash")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("erin purge: status %d, want 403", resp.StatusCode)
+	}
+
+	// Erasing one named entry works for the admin.
+	list = decode(t, h.get(admin, "/api/fs/trash"))
+	entries := list["entries"].([]any)
+	name := entries[0].(map[string]any)["name"].(string)
+	resp = h.delQuery(admin, "/api/fs/trash?name="+url.QueryEscape(name))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("erase one: status %d", resp.StatusCode)
+	}
+	list = decode(t, h.get(admin, "/api/fs/trash"))
+	entries = list["entries"].([]any)
+	if len(entries) != 1 {
+		t.Fatalf("after erase, trash holds %d, want 1", len(entries))
+	}
+
+	// The purge itself empties the rest.
+	resp = h.delQuery(admin, "/api/fs/trash")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin purge: status %d", resp.StatusCode)
+	}
+	list = decode(t, h.get(admin, "/api/fs/trash"))
+	if got := len(list["entries"].([]any)); got != 0 {
+		t.Fatalf("after purge, trash holds %d", got)
+	}
+	// The trashed files themselves are gone; their emptied parent folders
+	// stay, since deleting an entry never removes the folders around it.
+	if _, err := os.Stat(filepath.Join(h.root, "photos", "b.png")); !os.IsNotExist(err) {
+		t.Errorf("purged file still on disk: %v", err)
+	}
+	empty, rerr := os.ReadDir(filepath.Join(h.root, "photos", "2024"))
+	if rerr != nil || len(empty) != 0 {
+		t.Errorf("photos/2024 after purge: %v (%d entries)", rerr, len(empty))
 	}
 }

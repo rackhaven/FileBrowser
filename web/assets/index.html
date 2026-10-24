@@ -138,6 +138,7 @@
     <button class="drawer-item" id="mi-up" hidden>Go up one folder</button>
     <button class="drawer-item" id="mi-mkdir" hidden>New folder</button>
     <button class="drawer-item" id="mi-zip">Download this folder as zip</button>
+    <button class="drawer-item" id="mi-trash">Deleted items</button>
     <button class="drawer-item" id="mi-install" hidden>Install app</button>
     <button class="drawer-item" id="mi-pw">Change my password</button>
     <button class="drawer-item" id="mi-theme">Theme: <span id="theme-label">auto</span></button>
@@ -174,6 +175,17 @@
     </button>
   </div>
   <div class="drawer-body"><div id="search-results" class="list"></div></div>
+</aside>
+
+<aside id="trashpane" class="drawer" hidden aria-label="Deleted items">
+  <div class="drawer-head">
+    <strong>Deleted items</strong>
+    <button class="text-btn" id="trash-empty" hidden>Erase all</button>
+    <button class="icon-btn" id="trash-close" aria-label="Close">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div class="drawer-body"><div id="trash-rows"></div></div>
 </aside>
 
 <!-- --------------------------------------------------------------- sheets -->
