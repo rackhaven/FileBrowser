@@ -746,7 +746,7 @@ function openDetail(entry) {
 
 async function doDownload(entry) {
   if (entry.is_dir) {
-    toast('Folder download is not supported yet — open the folder and pick files.');
+    toast('Folder download is not supported yet; open the folder and pick files.');
     return;
   }
   // Images and PDFs open inline when the browser can display them, which is
@@ -779,14 +779,14 @@ async function doRename(entry) {
 async function doDelete(entry) {
   const ok = await confirmSheet(
     `Delete ${entry.name}?`,
-    entry.is_dir ? 'The folder and everything inside it will be permanently removed.' : 'This cannot be undone.',
+    'It moves to the Deleted items drawer, where you can restore or erase it.',
     'Delete'
   );
   if (!ok) return;
 
   try {
     await API.remove(entry.path);
-    toast('Deleted');
+    toast('Moved to Deleted items');
     navigate(state.path, { push: false });
   } catch (err) {
     toast(err.message, 'err');
@@ -1034,7 +1034,7 @@ function makeUserCard(u) {
   list.className = 'user-grants';
   const grants = u.admin
     ? [{ path: '/', level: 'admin' }]
-    : (u.grants && u.grants.length ? u.grants : [{ path: '—', level: 'none' }]);
+    : (u.grants && u.grants.length ? u.grants : [{ path: 'none', level: 'none' }]);
 
   for (const g of grants) {
     const li = document.createElement('li');

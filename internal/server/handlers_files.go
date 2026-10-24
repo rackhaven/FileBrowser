@@ -37,7 +37,7 @@ func (s *Server) writeFSError(w http.ResponseWriter, r *http.Request, err error)
 	case errors.Is(err, fs.ErrForbidden):
 		writeError(w, http.StatusForbidden, "you do not have access to this folder")
 	case errors.Is(err, fs.ErrReserved):
-		writeError(w, http.StatusConflict, "names beginning with .upload- are reserved while uploads are in flight")
+		writeError(w, http.StatusConflict, "that name is reserved by the server (a .trash directory, or a .upload- file while uploads are in flight)")
 	case errors.Is(err, fs.ErrNotExist):
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, fs.ErrNotDir):
