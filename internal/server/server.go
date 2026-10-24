@@ -36,6 +36,7 @@ type ctxKey string
 const (
 	ctxUser  ctxKey = "user"
 	ctxToken ctxKey = "token"
+	ctxSess  ctxKey = "session"
 )
 
 const sessionCookie = "fb_session"
@@ -160,6 +161,7 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		s.sessions.Touch(sess.Token) // sliding expiry for active users
 		ctx := context.WithValue(r.Context(), ctxUser, user)
 		ctx = context.WithValue(ctx, ctxToken, sess.Token)
+		ctx = context.WithValue(ctx, ctxSess, sess)
 		next(w, r.WithContext(ctx))
 	}
 }
@@ -179,6 +181,12 @@ func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 func userFrom(ctx context.Context) *auth.User {
 	u, _ := ctx.Value(ctxUser).(*auth.User)
 	return u
+}
+
+// sessionFrom pulls the caller's own live session out of the context.
+func sessionFrom(ctx context.Context) *auth.Session {
+	s, _ := ctx.Value(ctxSess).(*auth.Session)
+	return s
 }
 
 // allowLogin acquires one of the few slots for password hashing, or gives up

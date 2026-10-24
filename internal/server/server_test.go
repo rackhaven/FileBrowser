@@ -1309,3 +1309,93 @@ func TestTrashEraseAndPurgePerms(t *testing.T) {
 		t.Errorf("photos/2024 after purge: %v (%d entries)", rerr, len(empty))
 	}
 }
+
+// -------------------------------------------------------------- sessions ---
+
+func TestSessionsListAndRevoke(t *testing.T) {
+	h := newHarness(t)
+	c1 := h.login("admin", "password123")
+	c2 := h.login("admin", "password123")
+
+	// Both sessions belong to the account; exactly the caller's carries the
+	// current flag.
+	list := decode(t, h.get(c1, "/api/auth/sessions"))
+	sessions := list["sessions"].([]any)
+	if len(sessions) != 2 {
+		t.Fatalf("live sessions = %d, want 2", len(sessions))
+	}
+	var cur, other map[string]any
+	currents := 0
+	for _, raw := range sessions {
+		sess := raw.(map[string]any)
+		if sess["current"] == true {
+			cur = sess
+			currents++
+		} else {
+			other = sess
+		}
+	}
+	if currents != 1 || cur == nil || other == nil {
+		t.Fatalf("current flags wrong: %d marked, sessions %v", currents, sessions)
+	}
+	if _, err := time.Parse(time.RFC3339, other["created_at"].(string)); err != nil {
+		t.Errorf("created_at not RFC3339: %v", err)
+	}
+	if _, err := time.Parse(time.RFC3339, other["last_seen"].(string)); err != nil {
+		t.Errorf("last_seen not RFC3339: %v", err)
+	}
+	if hint, _ := other["token_hint"].(string); len(hint) < 4 {
+		t.Errorf("token_hint too short: %q", hint)
+	}
+
+	// Revoke the other device's session from here.
+	resp := h.delQuery(c1, "/api/auth/sessions?id="+url.QueryEscape(other["id"].(string)))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("revoke: status %d", resp.StatusCode)
+	}
+
+	// The revoked device is out immediately.
+	meResp := h.get(c2, "/api/auth/me")
+	if meResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("revoked device still signed in: status %d", meResp.StatusCode)
+	}
+	meResp.Body.Close()
+
+	// Gone for good: a second revoke is a miss.
+	resp = h.delQuery(c1, "/api/auth/sessions?id="+url.QueryEscape(other["id"].(string)))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("second revoke: status %d, want 404", resp.StatusCode)
+	}
+
+	// The current session cannot revoke itself here, that is sign-out's job;
+	// and an empty id is a bad request.
+	if resp := h.delQuery(c1, "/api/auth/sessions?id="+url.QueryEscape(cur["id"].(string))); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("self revoke: status %d, want 400", resp.StatusCode)
+		resp.Body.Close()
+	} else {
+		resp.Body.Close()
+	}
+	if resp := h.delQuery(c1, "/api/auth/sessions"); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("missing id: status %d, want 400", resp.StatusCode)
+		resp.Body.Close()
+	} else {
+		resp.Body.Close()
+	}
+
+	// Sessions are per account: another user sees exactly her own, and none
+	// of the admin's ids appear in it.
+	if _, err := h.users.Create("erin", "password123", false, nil); err != nil {
+		t.Fatalf("create erin: %v", err)
+	}
+	erin := h.login("erin", "password123")
+	list = decode(t, h.get(erin, "/api/auth/sessions"))
+	erinSessions := list["sessions"].([]any)
+	if len(erinSessions) != 1 {
+		t.Fatalf("erin sees %d sessions, want only her own", len(erinSessions))
+	}
+	if erinSessions[0].(map[string]any)["id"] == cur["id"] {
+		t.Error("erin was handed the admin's session id")
+	}
+}

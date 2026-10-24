@@ -393,3 +393,24 @@ button.ghost.danger, .drawer-item.danger { color: var(--danger); }
   font: inherit;
   font-size: 0.85rem;
 }
+
+/* Signed-in devices drawer: one row per live session of this account. */
+.sess-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.sess-text { flex: 1 1 auto; min-width: 0; }
+.sess-name {
+  display: block;
+  font-weight: 500;
+}
+.sess-hint {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 0.75rem;
+  color: var(--fg-muted);
+}
+.sess-note { padding: 10px 14px; font-size: 0.9rem; color: var(--fg-muted); }

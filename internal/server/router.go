@@ -35,6 +35,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auth/logout", s.requireAuth(s.handleLogout))
 	mux.HandleFunc("GET /api/auth/me", s.requireAuth(s.handleMe))
 	mux.HandleFunc("POST /api/auth/password", s.requireAuth(s.handleChangePassword))
+	mux.HandleFunc("GET /api/auth/sessions", s.requireAuth(s.handleSessionsList))
+	mux.HandleFunc("DELETE /api/auth/sessions", s.requireAuth(s.handleSessionEnd))
 
 	mux.HandleFunc("GET /api/fs/list", s.requireAuth(s.handleList))
 	mux.HandleFunc("GET /api/fs/info", s.requireAuth(s.handleInfo))

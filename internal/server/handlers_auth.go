@@ -16,6 +16,7 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -179,4 +180,71 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"needs_bootstrap": s.users.Count() == 0,
 	})
+}
+
+// sessionHint is the short recognisable fragment of a session token shown to
+// its owner. Six characters are enough to tell two sessions apart on one
+// account and are far from enough to impersonate anyone.
+func sessionHint(tok string) string {
+	const hintChars = 6
+	if len(tok) <= hintChars {
+		return tok
+	}
+	return tok[:hintChars] + "..."
+}
+
+type sessionView struct {
+	ID       string `json:"id"`
+	Created  string `json:"created_at"`
+	LastSeen string `json:"last_seen"`
+	Hint     string `json:"token_hint"`
+	Current  bool   `json:"current"`
+}
+
+// handleSessionsList returns the caller's live sessions.
+func (s *Server) handleSessionsList(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	current := sessionFrom(r.Context())
+	live := s.sessions.ListForUser(u.ID)
+
+	out := make([]sessionView, 0, len(live))
+	for _, sess := range live {
+		out = append(out, sessionView{
+			ID:       sess.PublicID,
+			Created:  sess.CreatedAt.UTC().Format(time.RFC3339),
+			LastSeen: sess.LastSeen.UTC().Format(time.RFC3339),
+			Hint:     sessionHint(sess.Token),
+			Current:  current != nil && sess.PublicID == current.PublicID,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": out})
+}
+
+// handleSessionEnd revokes one of the caller's other sessions by public id.
+// The current session refuses on purpose: the sign-out control already does
+// that job, and a misclick here should not be a remote lockout of yourself.
+func (s *Server) handleSessionEnd(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	current := sessionFrom(r.Context())
+
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "missing session id")
+		return
+	}
+	if current != nil && id == current.PublicID {
+		writeError(w, http.StatusBadRequest, "use sign out to end the current session")
+		return
+	}
+	if err := s.sessions.EndByID(u.ID, id); err != nil {
+		if errors.Is(err, auth.ErrNoSuchSession) {
+			writeError(w, http.StatusNotFound, "no such session")
+			return
+		}
+		s.logError("session id ambiguous", "user", u.Username, "err", err)
+		writeError(w, http.StatusInternalServerError, "session lookup ambiguous")
+		return
+	}
+	s.logf("session revoked", "user", u.Username, "id", id)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

@@ -336,6 +336,9 @@ except loopback.
 
 - **Sessions are in memory.** A restart signs everyone out. The user database
   survives; live sessions do not.
+- **You can sign devices out yourself, one at a time.** The menu lists every
+  live session of your account with when it was created and last used, and you
+  can revoke any of the others. A stolen cookie dies as soon as you click.
 - **There is no second factor.** If you want it, put the service behind a VPN,
   or add an identity-aware proxy in front.
 - **Rate limiting is per process and per IP.** A restart clears it. It is there
@@ -444,6 +447,8 @@ noted.
 | `POST` | `/api/auth/login` | `{username, password}` → sets the session cookie |
 | `POST` | `/api/auth/logout` | revokes the session |
 | `GET` | `/api/auth/me` | current user, plus version and uptime |
+| `GET` | `/api/auth/sessions` | live sessions of this account: id, times, a short token hint, which is current |
+| `DELETE` | `/api/auth/sessions?id=` | revoke one of your other sessions; the current one refuses, sign out instead |
 | `POST` | `/api/auth/password` | `{current_password, new_password}` |
 | `POST` | `/api/auth/bootstrap` | create the first admin; only while zero users exist |
 

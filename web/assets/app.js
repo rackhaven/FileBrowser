@@ -33,6 +33,8 @@ const API = {
   restore: (name) => req('POST', '/api/fs/restore', { name }),
   trashDelete: (name) => req('DELETE', `/api/fs/trash?name=${encodeURIComponent(name)}`),
   trashEmpty: () => req('DELETE', '/api/fs/trash', {}),
+  sessionsList: () => req('GET', '/api/auth/sessions'),
+  endSession: (id) => req('DELETE', `/api/auth/sessions?id=${encodeURIComponent(id)}`),
   users: () => req('GET', '/api/admin/users'),
   createUser: (b) => req('POST', '/api/admin/users', b),
   updateUser: (id, b) => req('PATCH', `/api/admin/users/${encodeURIComponent(id)}`, b),
@@ -103,7 +105,7 @@ const el = {
   crumbs: $('crumbs'), list: $('list'), empty: $('empty'),
   count: $('status-count'), quota: $('status-quota'), fab: $('btn-fab'),
   scrim: $('scrim'), menu: $('menu'), admin: $('admin'), searchpane: $('searchpane'),
-  trashpane: $('trashpane'), sheet: $('sheet'), detail: $('detail'), toasts: $('toasts'),
+  trashpane: $('trashpane'), sessionspane: $('sessionspane'), sheet: $('sheet'), detail: $('detail'), toasts: $('toasts'),
 };
 
 // ----------------------------------------------------------- formatting ---
@@ -202,6 +204,7 @@ function openPanel(node) {
   el.admin.hidden = true;
   el.searchpane.hidden = true;
   el.trashpane.hidden = true;
+  el.sessionspane.hidden = true;
   node.hidden = false;
   el.scrim.hidden = false;
 }
@@ -211,6 +214,7 @@ function closePanels() {
   el.admin.hidden = true;
   el.searchpane.hidden = true;
   el.trashpane.hidden = true;
+  el.sessionspane.hidden = true;
   el.scrim.hidden = true;
 }
 
@@ -612,6 +616,79 @@ function trashRow(entry) {
 function trashNote(text) {
   const d = document.createElement('div');
   d.className = 'trash-note';
+  d.textContent = text;
+  return d;
+}
+
+// ------------------------------------------------------------- sessions ---
+
+/**
+ * The signed-in devices drawer. Every row is one live session of this
+ * account; the current device is marked and its row has no revoke button,
+ * since the sign-out control exists for that. Ending a row kills that
+ * cookie on the spot, which is the point after a lost phone.
+ */
+async function renderSessions() {
+  const box = $('sessions-rows');
+  try {
+    const data = await API.sessionsList();
+    const sessions = data.sessions || [];
+    if (sessions.length === 0) {
+      box.replaceChildren(sessNote('No other devices are signed in.'));
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    for (const s of sessions) frag.append(sessRow(s));
+    box.replaceChildren(frag);
+  } catch (err) {
+    if (err.status === 401) return showLogin();
+    box.replaceChildren(sessNote(err.message));
+  }
+}
+
+function sessRow(sess) {
+  const row = document.createElement('div');
+  row.className = 'sess-row';
+
+  const title = document.createElement('span');
+  title.className = 'sess-name';
+  title.textContent = sess.current ? 'This device' : 'Another device';
+
+  const hint = document.createElement('span');
+  hint.className = 'sess-hint';
+  hint.textContent = sess.token_hint;
+
+  const meta = document.createElement('span');
+  meta.className = 'trash-sub';
+  meta.textContent = `signed in ${formatDate(sess.created_at)}, seen ${formatDate(sess.last_seen)}`;
+
+  const end = document.createElement('button');
+  end.className = 'mini-btn';
+  end.textContent = 'Sign out';
+  end.disabled = !!sess.current;
+  end.hidden = !!sess.current;
+  end.addEventListener('click', async () => {
+    if (!confirm('Sign that device out now?')) return;
+    try {
+      await API.endSession(sess.id);
+      renderSessions();
+      toast('Device signed out');
+    } catch (err) {
+      if (err.status === 401) return showLogin();
+      toast(err.message, 'err');
+    }
+  });
+
+  const text = document.createElement('span');
+  text.className = 'sess-text';
+  text.append(title, hint, meta);
+  row.append(text, end);
+  return row;
+}
+
+function sessNote(text) {
+  const d = document.createElement('div');
+  d.className = 'sess-note';
   d.textContent = text;
   return d;
 }
@@ -1220,6 +1297,11 @@ function wire() {
       toast(err.message, 'err');
     }
   });
+  $('mi-sessions').addEventListener('click', () => {
+    openPanel(el.sessionspane);
+    renderSessions();
+  });
+  $('sessions-close').addEventListener('click', closePanels);
   $('mi-mkdir').addEventListener('click', () => { closePanels(); doMkdir(); });
   $('mi-logout').addEventListener('click', doLogout);
   $('mi-theme').addEventListener('click', cycleTheme);
