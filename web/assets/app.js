@@ -28,6 +28,7 @@ const API = {
   usage: (p) => req('GET', `/api/fs/usage?path=${encodeURIComponent(p)}&depth=10`),
   mkdir: (b) => req('POST', '/api/fs/mkdir', b),
   rename: (b) => req('POST', '/api/fs/rename', b),
+  copy: (b) => req('POST', '/api/fs/copy', b),
   remove: (p) => req('POST', `/api/fs/delete?path=${encodeURIComponent(p)}`, {}),
   trash: () => req('GET', '/api/fs/trash'),
   restore: (name) => req('POST', '/api/fs/restore', { name }),
@@ -732,6 +733,8 @@ function openDetail(entry) {
   $('d-delete').hidden = !canModify;
 
   $('d-download').onclick = () => { el.detail.hidden = true; doDownload(entry); };
+  $('d-copy').hidden = !canModify;
+  $('d-copy').onclick = () => { el.detail.hidden = true; doCopy(entry); };
   $('d-rename').onclick = () => { el.detail.hidden = true; doRename(entry); };
   $('d-delete').onclick = () => { el.detail.hidden = true; doDelete(entry); };
   $('d-cancel').onclick = () => {
@@ -754,6 +757,34 @@ async function doDownload(entry) {
   const ext = entry.name.slice(entry.name.lastIndexOf('.'));
   if (INLINE_OK.test(ext)) startDownload(entry, { inline: true });
   else startDownload(entry);
+}
+
+async function doCopy(entry) {
+  const name = await promptSheet({
+    title: 'Copy',
+    text: entry.path,
+    label: 'Name of the copy',
+    value: copyName(entry.name),
+    ok: 'Copy',
+  });
+  if (!name || name === entry.name) return;
+  if (name.includes('/')) return toast('A name cannot contain a slash.', 'err');
+
+  try {
+    await API.copy({ from: entry.path, to_dir: state.path, name });
+    toast('Copied');
+    navigate(state.path, { push: false });
+  } catch (err) {
+    toast(err.message, 'err');
+  }
+}
+
+// copyName turns "photo.jpg" into "photo-copy.jpg", and leaves a name with
+// no extension recognizable ("notes" becomes "notes-copy").
+function copyName(name) {
+  const dot = name.lastIndexOf('.');
+  if (dot <= 0) return `${name}-copy`;
+  return `${name.slice(0, dot)}-copy${name.slice(dot)}`;
 }
 
 async function doRename(entry) {

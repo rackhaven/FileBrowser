@@ -16,8 +16,10 @@
 package fs
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/rackhaven/filebrowser/internal/auth"
@@ -254,5 +256,184 @@ func TestRestoreDeniedForOutsiders(t *testing.T) {
 	}
 	if err := f.RestoreTrash(admin, "../escape"); err != ErrNotExist {
 		t.Errorf("traversal name: %v, want ErrNotExist", err)
+	}
+}
+
+// -------------------------------------------------------------- copies ---
+
+func TestCopyFileAndFolder(t *testing.T) {
+	f := newTestFS(t)
+	root := mustRoot(f)
+	writeFile(t, root, "docs/readme.txt", "hello")
+	writeFile(t, root, "docs/deep/a.txt", "a")
+	writeFile(t, root, "docs/deep/b.txt", "b")
+	u := adminUser()
+
+	// A file becomes an independent file.
+	file, err := f.Copy(u, "/docs/readme.txt", "/", "readme-copy.txt")
+	if err != nil {
+		t.Fatalf("Copy file: %v", err)
+	}
+	if file.IsDir || file.Path != "/readme-copy.txt" || file.Size != 5 {
+		t.Fatalf("copy entry = %+v", file)
+	}
+	if raw, rerr := os.ReadFile(filepath.Join(root, "readme-copy.txt")); rerr != nil || string(raw) != "hello" {
+		t.Errorf("copied bytes: %q err %v", raw, rerr)
+	}
+	// Independence: changing the original must not reach the copy.
+	writeFile(t, root, "docs/readme.txt", "changed")
+	if raw, _ := os.ReadFile(filepath.Join(root, "readme-copy.txt")); string(raw) != "hello" {
+		t.Errorf("copy moved with the original: %q", raw)
+	}
+
+	// A folder becomes an independent subtree. Copying a folder from inside
+	// itself is a legal and useful ask, and must terminate.
+	dir, err := f.Copy(u, "/docs", "/docs", "docs-copy")
+	if err != nil {
+		t.Fatalf("Copy folder into itself: %v", err)
+	}
+	if !dir.IsDir || dir.Path != "/docs/docs-copy" {
+		t.Fatalf("copy entry = %+v", dir)
+	}
+	// Shares the rewrite from between the two copies: independence applies
+	// to the root-level file copy above, and this copy was made after it.
+	for p, want := range map[string]string{
+		"docs/docs-copy/readme.txt": "changed",
+		"docs/docs-copy/deep/a.txt": "a",
+		"docs/docs-copy/deep/b.txt": "b",
+	} {
+		if raw, rerr := os.ReadFile(filepath.Join(root, filepath.FromSlash(p))); rerr != nil || string(raw) != want {
+			t.Errorf("%s: %q err %v", p, raw, rerr)
+		}
+	}
+
+	// Listings show the copy with the machinery hidden.
+	entries, lerr := f.List(u, "/")
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	for _, e := range entries {
+		if isUploadTempName(e.Name) || e.Name == trashDirName {
+			t.Errorf("listing exposed reserved machinery: %q", e.Name)
+		}
+	}
+}
+
+func TestCopyRefusesAndPermissions(t *testing.T) {
+	f := newTestFS(t)
+	root := mustRoot(f)
+	writeFile(t, root, "docs/readme.txt", "hello")
+	// The existing destination lives at the root, beside the photos dir.
+	writeFile(t, root, "readme.txt", "root file")
+	writeFile(t, root, "photos/a.jpg", "JPEG")
+	u := adminUser()
+
+	// Existing destination: a copy is a create, never a replace.
+	if _, err := f.Copy(u, "/docs/readme.txt", "/", "readme.txt"); !errors.Is(err, os.ErrExist) {
+		t.Errorf("copy onto existing name: %v, want exists error", err)
+	}
+
+	// Reserved names cannot be sources or destinations.
+	if _, err := f.Copy(u, "/.trash", "/", "x"); err != ErrReserved && !errors.Is(err, ErrReserved) {
+		t.Errorf("copy from a reserved base: %v, want ErrReserved", err)
+	}
+	if _, err := f.Copy(u, "/docs", "/", ".upload-copy"); err != ErrReserved {
+		t.Errorf("copy into a reserved name: %v, want ErrReserved", err)
+	}
+	if _, err := f.Copy(u, "/", "/", "root-copy"); err == nil {
+		t.Error("copying the root succeeded")
+	}
+
+	// An empty name defaults to the source's own name, landing the copy
+	// beside the original under a fresh directory.
+	if err := os.MkdirAll(filepath.Join(root, "goes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Copy(u, "/docs/readme.txt", "/goes", ""); err != nil {
+		t.Errorf("copy with default name: %v", err)
+	}
+	if raw, rerr := os.ReadFile(filepath.Join(root, "goes", "readme.txt")); rerr != nil || string(raw) != "hello" {
+		t.Errorf("default-name copy: %q err %v", raw, rerr)
+	}
+
+	// The reader/writer split: read on the source and write on the target
+	// are both required.
+	reader := user(auth.AccessNone, auth.Grant{Path: "/docs", Level: auth.AccessRead})
+	if _, err := f.Copy(reader, "/docs/readme.txt", "/goes", "no.txt"); err != ErrForbidden {
+		t.Errorf("copy without write on target: %v, want ErrForbidden", err)
+	}
+	writer := user(auth.AccessNone, auth.Grant{Path: "/goes", Level: auth.AccessWrite})
+	if _, err := f.Copy(writer, "/docs/readme.txt", "/goes", "also.txt"); err != ErrForbidden {
+		t.Errorf("copy without read on source: %v, want ErrForbidden", err)
+	}
+	both := user(auth.AccessNone,
+		auth.Grant{Path: "/docs", Level: auth.AccessRead},
+		auth.Grant{Path: "/goes", Level: auth.AccessWrite})
+	if _, err := f.Copy(both, "/docs/readme.txt", "/goes", "ok.txt"); err != nil {
+		t.Errorf("copy with both grants: %v", err)
+	}
+
+	// Nothing of the copied tree may have polluted the source's siblings.
+	if _, err := os.Stat(filepath.Join(root, "docs", "readme.txt")); err != nil {
+		t.Errorf("source changed: %v", err)
+	}
+}
+
+func TestCopySymlinkPolicy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs privileges on Windows")
+	}
+	f := newTestFS(t)
+	root := mustRoot(f)
+	writeFile(t, root, "pile/note.txt", "note")
+
+	// Links in the pile: one to an in-root file, one to an in-root folder,
+	// and one folder link plus one file link reaching outside the root.
+	if err := os.Symlink("note.txt", filepath.Join(root, "pile", "file-link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../docs", filepath.Join(root, "pile", "docs-link")); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(filepath.Dir(root), "outside")
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("classified"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "pile", "outlink")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../../outside/secret.txt", filepath.Join(root, "pile", "escape-file")); err != nil {
+		t.Fatal(err)
+	}
+
+	u := adminUser()
+	if _, err := f.Copy(u, "/pile", "/docs", "mixed"); err != nil {
+		t.Fatalf("Copy pile: %v", err)
+	}
+
+	// Carried through: plain files and the content of in-root file links.
+	for rel, want := range map[string]string{
+		"docs/mixed/note.txt":  "note",
+		"docs/mixed/file-link": "note",
+	} {
+		if raw, rerr := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel))); rerr != nil || string(raw) != want {
+			t.Errorf("%s: %q err %v", rel, raw, rerr)
+		}
+	}
+
+	// Never carried: folder links, even harmless ones into the root
+	// (copying never walks a folder link, so a cycle layout cannot spin),
+	// and anything reaching outside the root.
+	for _, rel := range []string{
+		"docs/mixed/docs-link",
+		"docs/mixed/outlink",
+		"docs/mixed/escape-file",
+	} {
+		if _, err := os.Lstat(filepath.Join(root, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Errorf("%s should not be in the copy: %v", rel, err)
+		}
 	}
 }
