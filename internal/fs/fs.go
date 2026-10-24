@@ -280,8 +280,9 @@ func (f *FS) List(u *auth.User, vpath string) ([]Entry, error) {
 
 		// Temporary upload files are not listings material: they exist for
 		// the seconds between the upload body arriving and the rename into
-		// place, and another viewer shouldn't see (or race) them.
-		if isUploadTempName(name) {
+		// place, and another viewer shouldn't see (or race) them. The trash
+		// is reserved for the same reason: it is machinery, not content.
+		if isReservedName(name) {
 			continue
 		}
 
@@ -381,11 +382,14 @@ func (f *FS) Info(u *auth.User, vpath string) (Entry, error) {
 
 // Open returns an open file handle for streaming, enforcing read access.
 func (f *FS) Open(u *auth.User, vpath string) (*os.File, os.FileInfo, error) {
-	real, err := f.Resolve(u, vpath, auth.AccessRead)
-	if err != nil {
+	vp := Clean(vpath)
+	if _, err := f.Resolve(u, vp, auth.AccessRead); err != nil {
 		return nil, nil, err
 	}
-	file, err := os.Open(real)
+	// The open itself re-walks the path through the kernel's openat2 with the
+	// root as its clamp, so the symlink race the Resolve re-check closes
+	// above is also closed at the byte level.
+	file, err := openInside(f.realRoot, relFromVP(vp), os.O_RDONLY, 0)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil, ErrNotExist
@@ -405,6 +409,16 @@ func (f *FS) Open(u *auth.User, vpath string) (*os.File, os.FileInfo, error) {
 		return nil, nil, ErrNotDir
 	}
 	return file, info, nil
+}
+
+// relFromVP expresses a virtual path relative to the root, in the slash form
+// the openat2 family wants: "/docs/a.txt" becomes "docs/a.txt", the root
+// itself becomes ".".
+func relFromVP(vp string) string {
+	if vp == "/" || vp == "" {
+		return "."
+	}
+	return strings.TrimPrefix(vp, "/")
 }
 
 // within reports whether p is root itself or lies beneath it. filepath.Rel is

@@ -72,7 +72,7 @@ func (f *FS) Search(u *auth.User, vpath, substr string) (SearchOut, error) {
 			}
 			name := de.Name()
 
-			if isUploadTempName(name) {
+			if isReservedName(name) {
 				continue
 			}
 			childVP, jerr := Join(vDir, name)

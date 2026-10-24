@@ -29,6 +29,12 @@ const API = {
   mkdir: (b) => req('POST', '/api/fs/mkdir', b),
   rename: (b) => req('POST', '/api/fs/rename', b),
   remove: (p) => req('POST', `/api/fs/delete?path=${encodeURIComponent(p)}`, {}),
+  trash: () => req('GET', '/api/fs/trash'),
+  restore: (name) => req('POST', '/api/fs/restore', { name }),
+  trashDelete: (name) => req('DELETE', `/api/fs/trash?name=${encodeURIComponent(name)}`),
+  trashEmpty: () => req('DELETE', '/api/fs/trash', {}),
+  sessionsList: () => req('GET', '/api/auth/sessions'),
+  endSession: (id) => req('DELETE', `/api/auth/sessions?id=${encodeURIComponent(id)}`),
   users: () => req('GET', '/api/admin/users'),
   createUser: (b) => req('POST', '/api/admin/users', b),
   updateUser: (id, b) => req('PATCH', `/api/admin/users/${encodeURIComponent(id)}`, b),
@@ -99,7 +105,7 @@ const el = {
   crumbs: $('crumbs'), list: $('list'), empty: $('empty'),
   count: $('status-count'), quota: $('status-quota'), fab: $('btn-fab'),
   scrim: $('scrim'), menu: $('menu'), admin: $('admin'), searchpane: $('searchpane'),
-  sheet: $('sheet'), detail: $('detail'), toasts: $('toasts'),
+  trashpane: $('trashpane'), sessionspane: $('sessionspane'), sheet: $('sheet'), detail: $('detail'), toasts: $('toasts'),
 };
 
 // ----------------------------------------------------------- formatting ---
@@ -197,6 +203,8 @@ function openPanel(node) {
   el.menu.hidden = true;
   el.admin.hidden = true;
   el.searchpane.hidden = true;
+  el.trashpane.hidden = true;
+  el.sessionspane.hidden = true;
   node.hidden = false;
   el.scrim.hidden = false;
 }
@@ -205,6 +213,8 @@ function closePanels() {
   el.menu.hidden = true;
   el.admin.hidden = true;
   el.searchpane.hidden = true;
+  el.trashpane.hidden = true;
+  el.sessionspane.hidden = true;
   el.scrim.hidden = true;
 }
 
@@ -520,7 +530,173 @@ function startZip() {
   toast('Preparing a zip of this folder');
 }
 
-// ----------------------------------------------------------------- taps ---
+// ---------------------------------------------------------------- trash ---
+
+/**
+ * The deleted-items drawer. Entries are server-filtered: an admin sees
+ * everything, everyone else only what they may restore, so the rows carry
+ * every action their viewer is entitled to use.
+ */
+async function renderTrash() {
+  const box = $('trash-rows');
+  try {
+    const data = await API.trash();
+    const entries = data.entries || [];
+    $('trash-empty').hidden = entries.length === 0;
+
+    if (entries.length === 0) {
+      box.replaceChildren(trashNote('Nothing deleted. Deleting sends items here, not off the disk.'));
+      return;
+    }
+
+    const frag = document.createDocumentFragment();
+    for (const e of entries) frag.append(trashRow(e));
+    box.replaceChildren(frag);
+  } catch (err) {
+    if (err.status === 401) return showLogin();
+    box.replaceChildren(trashNote(err.message));
+  }
+}
+
+function trashRow(entry) {
+  const row = document.createElement('div');
+  row.className = 'trash-row';
+
+  const name = document.createElement('span');
+  name.className = 'trash-name';
+  name.textContent = entry.original_path || entry.name;
+  name.title = entry.original_path || entry.name;
+
+  const meta = document.createElement('span');
+  meta.className = 'trash-sub';
+  const when = formatDate(entry.deleted_at);
+  meta.textContent = entry.deleted_by ? `${when}, deleted by ${entry.deleted_by}` : when;
+
+  const restore = document.createElement('button');
+  restore.className = 'mini-btn';
+  restore.textContent = entry.can_restore ? 'Restore' : 'Denied';
+  if (entry.can_restore) {
+    restore.addEventListener('click', async () => {
+      try {
+        await API.restore(entry.name);
+        renderTrash();
+        if (state.user) navigate(state.path, { push: false });
+        toast('Restored');
+      } catch (err) {
+        if (err.status === 401) return showLogin();
+        toast(err.message, 'err');
+      }
+    });
+  } else {
+    restore.disabled = true;
+  }
+
+  const shred = document.createElement('button');
+  shred.className = 'trash-erase';
+  shred.textContent = 'Erase';
+  shred.addEventListener('click', async () => {
+    if (!confirm(`Erase ${entry.original_path || entry.name} for good?`)) return;
+    try {
+      await API.trashDelete(entry.name);
+      renderTrash();
+      toast('Erased for good');
+    } catch (err) {
+      if (err.status === 401) return showLogin();
+      toast(err.message, 'err');
+    }
+  });
+
+  const text = document.createElement('span');
+  text.className = 'trash-text';
+  text.append(name, meta);
+  row.append(text, restore, shred);
+  return row;
+}
+
+function trashNote(text) {
+  const d = document.createElement('div');
+  d.className = 'trash-note';
+  d.textContent = text;
+  return d;
+}
+
+// ------------------------------------------------------------- sessions ---
+
+/**
+ * The signed-in devices drawer. Every row is one live session of this
+ * account; the current device is marked and its row has no revoke button,
+ * since the sign-out control exists for that. Ending a row kills that
+ * cookie on the spot, which is the point after a lost phone.
+ */
+async function renderSessions() {
+  const box = $('sessions-rows');
+  try {
+    const data = await API.sessionsList();
+    const sessions = data.sessions || [];
+    if (sessions.length === 0) {
+      box.replaceChildren(sessNote('No other devices are signed in.'));
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    for (const s of sessions) frag.append(sessRow(s));
+    box.replaceChildren(frag);
+  } catch (err) {
+    if (err.status === 401) return showLogin();
+    box.replaceChildren(sessNote(err.message));
+  }
+}
+
+function sessRow(sess) {
+  const row = document.createElement('div');
+  row.className = 'sess-row';
+
+  const title = document.createElement('span');
+  title.className = 'sess-name';
+  title.textContent = sess.current ? 'This device' : 'Another device';
+
+  const hint = document.createElement('span');
+  hint.className = 'sess-hint';
+  hint.textContent = sess.token_hint;
+
+  const meta = document.createElement('span');
+  meta.className = 'trash-sub';
+  meta.textContent = `signed in ${formatDate(sess.created_at)}, seen ${formatDate(sess.last_seen)}`;
+
+  const end = document.createElement('button');
+  end.className = 'mini-btn';
+  end.textContent = 'Sign out';
+  end.disabled = !!sess.current;
+  end.hidden = !!sess.current;
+  end.addEventListener('click', async () => {
+    if (!confirm('Sign that device out now?')) return;
+    try {
+      await API.endSession(sess.id);
+      renderSessions();
+      toast('Device signed out');
+    } catch (err) {
+      if (err.status === 401) return showLogin();
+      toast(err.message, 'err');
+    }
+  });
+
+  const text = document.createElement('span');
+  text.className = 'sess-text';
+  text.append(title, hint, meta);
+  row.append(text, end);
+  return row;
+}
+
+function sessNote(text) {
+  const d = document.createElement('div');
+  d.className = 'sess-note';
+  d.textContent = text;
+  return d;
+}
+
+/**
+ * Deleting an entry re-lists the folder, since what vanished now lives in
+ * the trash. The trash drawer itself is only opened deliberately.
+ */
 
 function onEntryTap(entry, row) {
   if (entry.is_dir) {
@@ -1105,6 +1281,27 @@ function wire() {
     closePanels();
     startZip();
   });
+  $('mi-trash').addEventListener('click', () => {
+    openPanel(el.trashpane);
+    renderTrash();
+  });
+  $('trash-close').addEventListener('click', closePanels);
+  $('trash-empty').addEventListener('click', async () => {
+    if (!confirm('Erase every deleted item for everyone? This cannot be undone.')) return;
+    try {
+      await API.trashEmpty();
+      renderTrash();
+      toast('Trash emptied');
+    } catch (err) {
+      if (err.status === 401) return showLogin();
+      toast(err.message, 'err');
+    }
+  });
+  $('mi-sessions').addEventListener('click', () => {
+    openPanel(el.sessionspane);
+    renderSessions();
+  });
+  $('sessions-close').addEventListener('click', closePanels);
   $('mi-mkdir').addEventListener('click', () => { closePanels(); doMkdir(); });
   $('mi-logout').addEventListener('click', doLogout);
   $('mi-theme').addEventListener('click', cycleTheme);

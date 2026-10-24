@@ -471,3 +471,58 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintln(w, "ok")
 }
+
+// ------------------------------------------------------------ ----- trash ---
+
+// handleTrashList returns the trash entries the caller may act on.
+func (s *Server) handleTrashList(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	entries, err := s.files.TrashList(u)
+	if err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
+}
+
+type trashActionRequest struct {
+	Name string `json:"name"`
+}
+
+// handleRestore moves a trashed entry back to where it came from.
+func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	var req trashActionRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := s.files.RestoreTrash(u, req.Name); err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+	s.logf("restore", "user", u.Username, "name", req.Name)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleTrashDelete permanently removes a trashed entry, or the whole trash
+// when no name is given (admin only, and the one trash action with no undo).
+func (s *Server) handleTrashDelete(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		if err := s.files.TrashPurge(u); err != nil {
+			s.writeFSError(w, r, err)
+			return
+		}
+		s.logf("trash purged", "user", u.Username)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+	if err := s.files.TrashDelete(u, name); err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+	s.logf("trash deleted", "user", u.Username, "name", name)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}

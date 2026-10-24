@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -192,6 +193,21 @@ func decode(t *testing.T, resp *http.Response) map[string]any {
 		t.Fatalf("decode: %v", err)
 	}
 	return out
+}
+
+// delQuery issues a DELETE with an arbitrary path and query string, using the
+// given client's session cookie.
+func (h *harness) delQuery(client *http.Client, target string) *http.Response {
+	h.t.Helper()
+	req, err := http.NewRequest(http.MethodDelete, h.server.URL+target, nil)
+	if err != nil {
+		h.t.Fatalf("DELETE %s: %v", target, err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		h.t.Fatalf("DELETE %s: %v", target, err)
+	}
+	return resp
 }
 
 // --------------------------------------------------------------- tests ----
@@ -1179,5 +1195,207 @@ func TestThumbEndpointErrors(t *testing.T) {
 		if resp.StatusCode != p.want {
 			t.Errorf("thumb of %s: status %d, want %d", p.path, resp.StatusCode, p.want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------- trash ---
+
+func TestTrashLifecycle(t *testing.T) {
+	h := newHarness(t)
+	admin := h.login("admin", "password123")
+
+	// The ordinary delete endpoint moves into the trash.
+	resp := h.post(admin, "/api/fs/delete?path=/docs/notes.txt", `{}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete: status %d", resp.StatusCode)
+	}
+	if _, err := os.Stat(filepath.Join(h.root, "docs", "notes.txt")); !os.IsNotExist(err) {
+		t.Fatalf("source still on disk: %v", err)
+	}
+
+	// The trash lists it with the record fields the drawer renders.
+	list := decode(t, h.get(admin, "/api/fs/trash"))
+	entries, ok := list["entries"].([]any)
+	if !ok || len(entries) != 1 {
+		t.Fatalf("trash = %v, want one entry", list["entries"])
+	}
+	entry := entries[0].(map[string]any)
+	if entry["original_path"] != "/docs/notes.txt" || entry["deleted_by"] != "admin" || entry["can_restore"] != true {
+		t.Fatalf("entry = %v", entry)
+	}
+	name, _ := entry["name"].(string)
+	if name == "" || entry["deleted_at"] == "" {
+		t.Fatalf("entry name or time missing: %v", entry)
+	}
+
+	// Restore puts the bytes back where they came from.
+	resp = h.post(admin, "/api/fs/restore", fmt.Sprintf(`{"name":%q}`, name))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("restore: status %d", resp.StatusCode)
+	}
+	raw, err := os.ReadFile(filepath.Join(h.root, "docs", "notes.txt"))
+	if err != nil || string(raw) != "secret notes" {
+		t.Fatalf("restored file: %q err %v", raw, err)
+	}
+	list = decode(t, h.get(admin, "/api/fs/trash"))
+	if got := len(list["entries"].([]any)); got != 0 {
+		t.Fatalf("trash after restore holds %d", got)
+	}
+}
+
+func TestTrashEraseAndPurgePerms(t *testing.T) {
+	h := newHarness(t)
+	admin := h.login("admin", "password123")
+
+	// A second user with no grants: not admin, cannot see restorable
+	// entries, cannot purge.
+	if _, err := h.users.Create("erin", "password123", false, nil); err != nil {
+		t.Fatalf("create erin: %v", err)
+	}
+	erin := h.login("erin", "password123")
+
+	resp := h.post(admin, "/api/fs/delete?path=/photos/b.png", `{}`)
+	resp.Body.Close()
+	resp = h.post(admin, "/api/fs/delete?path=/photos/2024/a.jpg", `{}`)
+	resp.Body.Close()
+
+	// Erin's list hides the entries (no write anywhere to restore them to).
+	list := decode(t, h.get(erin, "/api/fs/trash"))
+	if got := len(list["entries"].([]any)); got != 0 {
+		t.Fatalf("erin sees %d trash entries, want none", got)
+	}
+
+	// Purge without a name is the whole-trash wipe: admins only.
+	resp = h.delQuery(erin, "/api/fs/trash")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("erin purge: status %d, want 403", resp.StatusCode)
+	}
+
+	// Erasing one named entry works for the admin.
+	list = decode(t, h.get(admin, "/api/fs/trash"))
+	entries := list["entries"].([]any)
+	name := entries[0].(map[string]any)["name"].(string)
+	resp = h.delQuery(admin, "/api/fs/trash?name="+url.QueryEscape(name))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("erase one: status %d", resp.StatusCode)
+	}
+	list = decode(t, h.get(admin, "/api/fs/trash"))
+	entries = list["entries"].([]any)
+	if len(entries) != 1 {
+		t.Fatalf("after erase, trash holds %d, want 1", len(entries))
+	}
+
+	// The purge itself empties the rest.
+	resp = h.delQuery(admin, "/api/fs/trash")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin purge: status %d", resp.StatusCode)
+	}
+	list = decode(t, h.get(admin, "/api/fs/trash"))
+	if got := len(list["entries"].([]any)); got != 0 {
+		t.Fatalf("after purge, trash holds %d", got)
+	}
+	// The trashed files themselves are gone; their emptied parent folders
+	// stay, since deleting an entry never removes the folders around it.
+	if _, err := os.Stat(filepath.Join(h.root, "photos", "b.png")); !os.IsNotExist(err) {
+		t.Errorf("purged file still on disk: %v", err)
+	}
+	empty, rerr := os.ReadDir(filepath.Join(h.root, "photos", "2024"))
+	if rerr != nil || len(empty) != 0 {
+		t.Errorf("photos/2024 after purge: %v (%d entries)", rerr, len(empty))
+	}
+}
+
+// -------------------------------------------------------------- sessions ---
+
+func TestSessionsListAndRevoke(t *testing.T) {
+	h := newHarness(t)
+	c1 := h.login("admin", "password123")
+	c2 := h.login("admin", "password123")
+
+	// Both sessions belong to the account; exactly the caller's carries the
+	// current flag.
+	list := decode(t, h.get(c1, "/api/auth/sessions"))
+	sessions := list["sessions"].([]any)
+	if len(sessions) != 2 {
+		t.Fatalf("live sessions = %d, want 2", len(sessions))
+	}
+	var cur, other map[string]any
+	currents := 0
+	for _, raw := range sessions {
+		sess := raw.(map[string]any)
+		if sess["current"] == true {
+			cur = sess
+			currents++
+		} else {
+			other = sess
+		}
+	}
+	if currents != 1 || cur == nil || other == nil {
+		t.Fatalf("current flags wrong: %d marked, sessions %v", currents, sessions)
+	}
+	if _, err := time.Parse(time.RFC3339, other["created_at"].(string)); err != nil {
+		t.Errorf("created_at not RFC3339: %v", err)
+	}
+	if _, err := time.Parse(time.RFC3339, other["last_seen"].(string)); err != nil {
+		t.Errorf("last_seen not RFC3339: %v", err)
+	}
+	if hint, _ := other["token_hint"].(string); len(hint) < 4 {
+		t.Errorf("token_hint too short: %q", hint)
+	}
+
+	// Revoke the other device's session from here.
+	resp := h.delQuery(c1, "/api/auth/sessions?id="+url.QueryEscape(other["id"].(string)))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("revoke: status %d", resp.StatusCode)
+	}
+
+	// The revoked device is out immediately.
+	meResp := h.get(c2, "/api/auth/me")
+	if meResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("revoked device still signed in: status %d", meResp.StatusCode)
+	}
+	meResp.Body.Close()
+
+	// Gone for good: a second revoke is a miss.
+	resp = h.delQuery(c1, "/api/auth/sessions?id="+url.QueryEscape(other["id"].(string)))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("second revoke: status %d, want 404", resp.StatusCode)
+	}
+
+	// The current session cannot revoke itself here, that is sign-out's job;
+	// and an empty id is a bad request.
+	if resp := h.delQuery(c1, "/api/auth/sessions?id="+url.QueryEscape(cur["id"].(string))); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("self revoke: status %d, want 400", resp.StatusCode)
+		resp.Body.Close()
+	} else {
+		resp.Body.Close()
+	}
+	if resp := h.delQuery(c1, "/api/auth/sessions"); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("missing id: status %d, want 400", resp.StatusCode)
+		resp.Body.Close()
+	} else {
+		resp.Body.Close()
+	}
+
+	// Sessions are per account: another user sees exactly her own, and none
+	// of the admin's ids appear in it.
+	if _, err := h.users.Create("erin", "password123", false, nil); err != nil {
+		t.Fatalf("create erin: %v", err)
+	}
+	erin := h.login("erin", "password123")
+	list = decode(t, h.get(erin, "/api/auth/sessions"))
+	erinSessions := list["sessions"].([]any)
+	if len(erinSessions) != 1 {
+		t.Fatalf("erin sees %d sessions, want only her own", len(erinSessions))
+	}
+	if erinSessions[0].(map[string]any)["id"] == cur["id"] {
+		t.Error("erin was handed the admin's session id")
 	}
 }

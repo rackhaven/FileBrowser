@@ -82,7 +82,7 @@ func (f *FS) Zip(u *auth.User, vpath string, w io.Writer) error {
 		for _, de := range des {
 			name := de.Name()
 
-			if isUploadTempName(name) {
+			if isReservedName(name) {
 				continue
 			}
 			childVP, jerr := Join(vDir, name)
@@ -140,7 +140,16 @@ func (f *FS) Zip(u *auth.User, vpath string, w io.Writer) error {
 			if err != nil {
 				return err
 			}
-			file, err := os.Open(filepath.Join(realDir, name))
+			// The open goes through openat2 under the FS root, not a plain
+			// path open: a raced symlink may not walk out of the root. The
+			// relative path is derived from the real element, so an in-root
+			// symlink target keeps working like before.
+			target := filepath.Join(realDir, name)
+			relTo, rerr := filepath.Rel(f.realRoot, target)
+			if rerr != nil {
+				continue // sits outside the root: not archive material
+			}
+			file, err := openInside(f.realRoot, filepath.ToSlash(relTo), os.O_RDONLY, 0)
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
 					continue // raced away, or unreadable now

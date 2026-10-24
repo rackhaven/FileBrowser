@@ -173,12 +173,25 @@ func TestResolveAllowsSymlinkInsideRoot(t *testing.T) {
 	f := newTestFS(t)
 	u := user(auth.AccessAdmin)
 
-	if err := os.Symlink(filepath.Join(f.Root(), "docs"), filepath.Join(f.Root(), "docs-link")); err != nil {
+	// Targets of links inside the tree are written relative to the link, the
+	// form the kernel's clamped resolution can follow all the way through;
+	// see the containment note in the README about absolute targets.
+	if err := os.Symlink("docs", filepath.Join(f.Root(), "docs-link")); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
 	if _, err := f.Resolve(u, "/docs-link/readme.txt", auth.AccessRead); err != nil {
 		t.Fatalf("symlink inside root should resolve: %v", err)
 	}
+	// The open goes through the same clamped walk and must succeed, so the
+	// listing promise and the download promise agree.
+	file, info, err := f.Open(u, "/docs-link/readme.txt")
+	if err != nil {
+		t.Fatalf("Open through an in-root symlink: %v", err)
+	}
+	if info.Name() != "readme.txt" {
+		t.Errorf("Open named %q", info.Name())
+	}
+	file.Close()
 }
 
 // ------------------------------------------------------------------ ACL ----

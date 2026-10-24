@@ -342,3 +342,75 @@ button.ghost.danger, .drawer-item.danger { color: var(--danger); }
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
+
+/* Trash drawer: one row per deleted entry, restore and erase at the right. */
+.text-btn {
+  background: transparent;
+  border: 0;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.9rem;
+  padding: 4px 8px;
+}
+.trash-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.trash-text { flex: 1 1 auto; min-width: 0; }
+.trash-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.trash-sub {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--fg-muted);
+}
+.trash-note { padding: 10px 14px; font-size: 0.9rem; color: var(--fg-muted); }
+.mini-btn {
+  flex: none;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  font: inherit;
+  font-size: 0.85rem;
+}
+.mini-btn:disabled { color: var(--fg-muted); }
+.trash-erase {
+  flex: none;
+  padding: 4px 10px;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--danger);
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+/* Signed-in devices drawer: one row per live session of this account. */
+.sess-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.sess-text { flex: 1 1 auto; min-width: 0; }
+.sess-name {
+  display: block;
+  font-weight: 500;
+}
+.sess-hint {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 0.75rem;
+  color: var(--fg-muted);
+}
+.sess-note { padding: 10px 14px; font-size: 0.9rem; color: var(--fg-muted); }

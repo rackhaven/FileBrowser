@@ -464,3 +464,66 @@ func newStoreAt(t *testing.T, path string) *Store {
 	}
 	return s
 }
+
+func TestListForUserAndEndByID(t *testing.T) {
+	s := NewSessions(time.Hour)
+	now := time.Now()
+	s.now = func() time.Time { return now }
+
+	a, _ := s.Start("user-1")
+	now = now.Add(time.Minute)
+	b, _ := s.Start("user-1")
+	_, _ = s.Start("user-2")
+	now = now.Add(time.Minute)
+
+	// Newest first, and only that user's.
+	live := s.ListForUser("user-1")
+	if len(live) != 2 || live[0].Token != b.Token || live[1].Token != a.Token {
+		t.Fatalf("ListForUser = %v", live)
+	}
+	for _, sess := range live {
+		if sess.PublicID == "" || sess.PublicID == sess.Token {
+			t.Errorf("public id missing or a raw token: %q", sess.PublicID)
+		}
+	}
+
+	// Unknown and empty ids answer as missing.
+	if err := s.EndByID("user-1", ""); !errors.Is(err, ErrNoSuchSession) {
+		t.Errorf("empty id: %v", err)
+	}
+	if err := s.EndByID("user-1", "nope"); !errors.Is(err, ErrNoSuchSession) {
+		t.Errorf("unknown id: %v", err)
+	}
+
+	// Revoking by public id kills exactly that session.
+	if err := s.EndByID("user-1", a.PublicID); err != nil {
+		t.Fatalf("EndByID: %v", err)
+	}
+	if s.Lookup(a.Token) != nil {
+		t.Error("the revoked session still resolves")
+	}
+	if s.Lookup(b.Token) == nil {
+		t.Error("an unrelated session was revoked")
+	}
+	// Another account's id does not revoke this account's session.
+	if err := s.EndByID("user-2", b.PublicID); len(s.ListForUser("user-1")) != 1 {
+		t.Errorf("another user's revoke got through: %v", err)
+	}
+}
+
+func TestPublicIDsDistinctAcrossSessions(t *testing.T) {
+	s := NewSessions(time.Hour)
+	seen := make(map[string]int)
+	for i := 0; i < 24; i++ {
+		sess, err := s.Start("user-1")
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		seen[sess.PublicID]++
+	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Fatalf("public id %q repeats on %d live sessions", id, n)
+		}
+	}
+}
