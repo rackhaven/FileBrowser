@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"image"
 	"image/jpeg"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -102,7 +103,8 @@ func (f *FS) SetThumbCache(dir string) error {
 // or below ThumbSize pass through with their original bytes and type; larger
 // ones are decoded, resampled to fit, and re-encoded as JPEG.
 func (f *FS) Thumbnail(u *auth.User, vpath string) (Thumb, error) {
-	realPath, err := f.Resolve(u, Clean(vpath), auth.AccessRead)
+	vp := Clean(vpath)
+	realPath, err := f.Resolve(u, vp, auth.AccessRead)
 	if err != nil {
 		return Thumb{}, err
 	}
@@ -132,7 +134,7 @@ func (f *FS) Thumbnail(u *auth.User, vpath string) (Thumb, error) {
 
 	// DecodeConfig reads only the header, so the fit decision for a huge
 	// file costs kilobytes, not megabytes.
-	cfg, derr := decodeConfigFile(realPath)
+	cfg, derr := f.decodeConfigFile(relFromVP(vp))
 	if derr != nil {
 		// A dot-png that is really an HTML error page must fail as "not an
 		// image", not as a 500.
@@ -141,14 +143,22 @@ func (f *FS) Thumbnail(u *auth.User, vpath string) (Thumb, error) {
 	if cfg.Width <= ThumbSize && cfg.Height <= ThumbSize {
 		// Already small: the original is its own best preview. Passing the
 		// bytes straight through avoids a pointless re-encode.
-		raw, rerr := os.ReadFile(realPath)
+		fh, oerr := openInside(f.realRoot, relFromVP(vp), os.O_RDONLY, 0)
+		if oerr != nil {
+			return Thumb{}, oerr
+		}
+		raw, rerr := io.ReadAll(fh)
+		cerr := fh.Close()
 		if rerr != nil {
 			return Thumb{}, rerr
+		}
+		if cerr != nil {
+			return Thumb{}, cerr
 		}
 		return Thumb{Data: raw, ContentType: format, ModTime: info.ModTime()}, nil
 	}
 
-	img, derr := decodeFile(realPath)
+	img, derr := f.decodeFile(relFromVP(vp))
 	if derr != nil {
 		return Thumb{}, addNotImage(derr)
 	}
@@ -178,10 +188,11 @@ func (f *FS) thumbCachePath(realPath string, info os.FileInfo) string {
 	return filepath.Join(f.thumbCache, "t-"+hex.EncodeToString(sum[:16])+".jpg")
 }
 
-// decodeConfigFile opens realPath and asks the registered decoders how large
-// the image inside is, without decoding the pixels.
-func decodeConfigFile(realPath string) (image.Config, error) {
-	file, err := os.Open(realPath)
+// decodeConfigFile opens the image under the root (rel is the root-relative
+// slash path) and asks the registered decoders how large the image inside is,
+// without decoding the pixels.
+func (f *FS) decodeConfigFile(rel string) (image.Config, error) {
+	file, err := openInside(f.realRoot, rel, os.O_RDONLY, 0)
 	if err != nil {
 		return image.Config{}, err
 	}
@@ -196,9 +207,9 @@ func decodeConfigFile(realPath string) (image.Config, error) {
 	return cfg, nil
 }
 
-// decodeFile decodes the first frame of the image at realPath.
-func decodeFile(realPath string) (image.Image, error) {
-	file, err := os.Open(realPath)
+// decodeFile decodes the first frame of the image found under the root at rel.
+func (f *FS) decodeFile(rel string) (image.Image, error) {
+	file, err := openInside(f.realRoot, rel, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
 	}

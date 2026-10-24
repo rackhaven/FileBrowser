@@ -301,7 +301,14 @@ What the design actually guarantees, rather than what it merely tries to do:
 rejects traversal (`..`, absolute paths, backslashes, encoded separators) and
 then re-checks containment *after* following symlinks. A symlink inside the
 root that points at `/etc` is neither listable nor readable. `..` at the top
-clamps to the root the way a chroot does, rather than escaping it.
+clamps to the root the way a chroot does, rather than escaping it. On Linux
+the open that finally touches the bytes goes through `openat2` with the root
+directory as the kernel's anchor: even a race that swaps in a symlink after the
+resolve cannot walk outside, and `/proc`-style magic links are refused
+outright. Links inside the tree work when their target is written relative to
+the link, the form that survives the tree being anywhere; a link that names
+the root by its absolute location on disk cannot be followed, because the
+kernel re-anchors targets inside the root, and it opens as not found.
 
 **No information leak through listings.** A folder the user cannot open is
 omitted from the listing entirely, rather than shown greyed out. Revealing that
