@@ -6,7 +6,7 @@
 # TARGETARCH is what buildx sets per requested platform (amd64, arm64).
 # A plain docker build leaves it empty, and Go then falls back to the
 # builder's own architecture, which is the single-platform behaviour.
-FROM golang:1.23-alpine AS build
+FROM golang:1.26-alpine AS build
 
 WORKDIR /src
 
