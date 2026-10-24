@@ -401,6 +401,18 @@ make build-all    # static binaries for linux, darwin, windows
 make image        # build the container (tests run inside the build)
 ```
 
+### Releases
+
+A release is a tag. Push a `v`-prefixed tag and the release workflow
+(`.github/workflows/release.yml`) runs the test suite, vet and formatting
+again at the tag, then builds static binaries for `linux`, and macOS and
+Windows (`amd64` and `arm64` on linux and macOS), each with `CGO_ENABLED=0`,
+`-trimpath` and the tag stamped into `filebrowser version`. `gh` publishes a
+GitHub release with the binaries and a `sha256sum` manifest, and a second job
+pushes the container image to `ghcr.io` under the same tag plus `latest`,
+assembled by the same Dockerfile CI uses, so the tests run inside the image
+build too.
+
 ### Tests
 
 The suite leans on the filesystem rules, because that is where the risk is:
