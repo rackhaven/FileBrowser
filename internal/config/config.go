@@ -40,6 +40,11 @@ type Config struct {
 	DataDir string `yaml:"data_dir"`
 	// SessionTTL is how long a login stays valid.
 	SessionTTL time.Duration `yaml:"session_ttl"`
+	// TrashTTL is how long deleted entries stay in the trash before the
+	// server erases them. The safety net stays a safety net instead of a
+	// second, hidden copy of every deleted file. Zero disables retention:
+	// nothing is erased by the server, only by hands.
+	TrashTTL time.Duration `yaml:"trash_ttl"`
 	// TLSCert / TLSKey enable direct TLS (optional; a reverse proxy is
 	// usually better because it handles renewals).
 	TLSCert string `yaml:"tls_cert"`
@@ -64,6 +69,9 @@ func Default() Config {
 		Root:       "/srv/files",
 		DataDir:    "/data",
 		SessionTTL: 7 * 24 * time.Hour,
+		// 30 days. Old enough to cover every reasonable "wait, no", short
+		// enough that disk space cannot fill up with forgotten deletes.
+		TrashTTL: 30 * 24 * time.Hour,
 		// 32 GiB. Generous, but a cap: a hostile client must not be able to
 		// fill the disk through uploads alone.
 		MaxUploadBytes: 32 << 30,
@@ -102,6 +110,17 @@ func Load(path string) (Config, error) {
 		cfg.SessionTTL = d
 	}
 
+	if v, ok := os.LookupEnv("FB_TRASH_TTL"); ok {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return cfg, fmt.Errorf("FB_TRASH_TTL: %w", err)
+			}
+			cfg.TrashTTL = d
+		}
+	}
+
 	if cfg.Listen == "" {
 		return cfg, fmt.Errorf("listen address must not be empty")
 	}
@@ -116,6 +135,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.MaxUploadBytes <= 0 {
 		return cfg, fmt.Errorf("max_upload_bytes must be a positive number of bytes")
+	}
+	if cfg.TrashTTL < 0 {
+		return cfg, fmt.Errorf("trash_ttl must not be negative: use zero to keep deleted entries until erased by hand")
 	}
 
 	cfg.Root = filepath.Clean(cfg.Root)

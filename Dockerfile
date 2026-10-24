@@ -1,6 +1,11 @@
 # syntax=docker/dockerfile:1
 
 # ---- build ----------------------------------------------------------------
+# One build stage, cross-compiled: the suite below runs on the builder's
+# own platform, once, and the per-platform output is only the build step.
+# TARGETARCH is what buildx sets per requested platform (amd64, arm64).
+# A plain docker build leaves it empty, and Go then falls back to the
+# builder's own architecture, which is the single-platform behaviour.
 FROM golang:1.23-alpine AS build
 
 WORKDIR /src
@@ -14,12 +19,14 @@ COPY . .
 # CGO off produces a static binary that runs on any Linux, including a Pi.
 # -trimpath keeps build paths out of the binary; the version is injected.
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux go build \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" go build \
       -trimpath \
       -ldflags "-s -w -X main.version=${VERSION}" \
       -o /out/filebrowser ./cmd/filebrowser
 
-# Run the tests against the same toolchain before shipping.
+# Run the tests against the same toolchain before shipping. This step has
+# no TARGETARCH in it, deliberately: the test binaries always run on the
+# builder natively and their result is shared by both platforms.
 RUN go vet ./... && go test ./...
 
 # ---- runtime --------------------------------------------------------------

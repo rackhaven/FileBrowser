@@ -104,9 +104,9 @@ User flags (place them before the username):
 Passwords are always prompted for; they are never accepted as arguments,
 because command lines are visible to other processes and shell history.
 
-Environment: FB_LISTEN, FB_ROOT, FB_DATA_DIR, FB_SESSION_TTL, FB_TLS_CERT,
-FB_TLS_KEY, FB_TRUST_PROXY_HEADERS, FB_MAX_UPLOAD_BYTES, FB_LOG_LEVEL,
-FB_ADMIN_USER, FB_ADMIN_PASSWORD
+Environment: FB_LISTEN, FB_ROOT, FB_DATA_DIR, FB_SESSION_TTL, FB_TRASH_TTL,
+FB_TLS_CERT, FB_TLS_KEY, FB_TRUST_PROXY_HEADERS, FB_MAX_UPLOAD_BYTES,
+FB_LOG_LEVEL, FB_ADMIN_USER, FB_ADMIN_PASSWORD
 `)
 }
 
@@ -122,6 +122,7 @@ func runServe(args []string) error {
 		listen     = fs_.String("listen", "", "address to bind")
 		root       = fs_.String("root", "", "directory to expose")
 		dataDir    = fs_.String("data", "", "directory for the user database")
+		trashTTL   = fs_.String("trash-ttl", "", "erase deleted items older than this, e.g. 720h; 0 keeps them")
 	)
 	if err := fs_.Parse(args); err != nil {
 		return err
@@ -140,6 +141,13 @@ func runServe(args []string) error {
 	}
 	if *dataDir != "" {
 		cfg.DataDir = filepath.Clean(*dataDir)
+	}
+	if *trashTTL != "" {
+		d, err := time.ParseDuration(*trashTTL)
+		if err != nil {
+			return fmt.Errorf("-trash-ttl: %w", err)
+		}
+		cfg.TrashTTL = d
 	}
 
 	logger := newLogger()
@@ -177,6 +185,12 @@ func runServe(args []string) error {
 		Version:  version,
 		Logger:   logger,
 	})
+
+	// Deleted entries age out of the trash quietly: retention is a server
+	// policy, not something each user is asked about at delete time.
+	if cfg.TrashTTL > 0 {
+		go trashRetention(files, cfg.TrashTTL, logger)
+	}
 
 	httpServer := &http.Server{
 		Addr:    cfg.Listen,
@@ -296,6 +310,23 @@ func bootstrapAdmin(store *auth.Store, dataDir string, logger *slog.Logger) erro
 		logger.Warn("could not tighten permissions on the user database", "err", err)
 	}
 	return nil
+}
+
+// trashRetention runs the trash window in the background: a sweep at
+// start-up, then once a day. The retention clock is days, so daily runs
+// keep every entry within a day of its window; pacing it any tighter
+// only burns cycles on directory reads.
+func trashRetention(files *fs.FS, ttl time.Duration, log *slog.Logger) {
+	for i := 0; ; i++ {
+		// Read-and-remove races with restore and wipe by idempotent
+		// steps on both sides, so no locking is worth the complexity.
+		if n, err := files.TrashSweep(ttl); err != nil {
+			log.Error("trash retention", "err", err)
+		} else if n > 0 {
+			log.Info("trash retention", "erased", n)
+		}
+		time.Sleep(24 * time.Hour)
+	}
 }
 
 // -------------------------------------------------------------- user ------

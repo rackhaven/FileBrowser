@@ -143,6 +143,12 @@ anything you deleted, or anything deleted from a folder you can write to, with
 recreates any folders that went with it. Erasing every item at once is an
 administrator action, and nothing in the trash survives being erased.
 
+**Deleted items age out.** By default entries leave the trash after 30 days
+(`trash_ttl`), erasing item and record quietly in the background, once a day.
+The trash is a safety net against a finger slip, not a second copy of your
+files or a substitute for backups. Set the window to `0s` to disable:
+nothing is erased by the server, only by hands.
+
 **Administrators cannot remove, disable or demote the last remaining
 administrator**, so you cannot lock yourself out.
 
@@ -283,6 +289,7 @@ file.
 | `-data`         | `FB_DATA_DIR`          | `/data`        | holds `users.json` and `sessions.json` |
 | `-config`       | —                      | —              | YAML config file                    |
 |                | `FB_SESSION_TTL`       | `168h`         | how long a sign-in lasts            |
+|                | `FB_TRASH_TTL`         | `720h`         | deleted items leave the trash after this; `0s` keeps them |
 |                | `FB_TRUST_PROXY_HEADERS` | `false`      | honour `X-Forwarded-Proto` and `X-Forwarded-For` |
 |                | `FB_MAX_UPLOAD_BYTES`  | `34359738368`  | largest upload, in bytes            |
 |                | `FB_THUMB_CACHE`       | `/data/thumbs` | where generated image previews live |
@@ -418,7 +425,9 @@ Windows (`amd64` and `arm64` on linux and macOS), each with `CGO_ENABLED=0`,
 GitHub release with the binaries and a `sha256sum` manifest, and a second job
 pushes the container image to `ghcr.io` under the same tag plus `latest`,
 assembled by the same Dockerfile CI uses, so the tests run inside the image
-build too.
+build too. The image is published for `linux/amd64` and `linux/arm64`: the
+suite runs once on the builder and each platform gets its own build step, so
+roughly the same two minutes produce both.
 
 ### Tests
 
