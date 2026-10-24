@@ -425,7 +425,9 @@ Windows (`amd64` and `arm64` on linux and macOS), each with `CGO_ENABLED=0`,
 GitHub release with the binaries and a `sha256sum` manifest, and a second job
 pushes the container image to `ghcr.io` under the same tag plus `latest`,
 assembled by the same Dockerfile CI uses, so the tests run inside the image
-build too.
+build too. The image is published for `linux/amd64` and `linux/arm64`: the
+suite runs once on the builder and each platform gets its own build step, so
+roughly the same two minutes produce both.
 
 ### Tests
 

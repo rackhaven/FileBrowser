@@ -81,15 +81,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
+      # The runtime stage's package commands run on each target, so arm64
+      # needs emulation even though the binaries cross-compile natively.
+      - uses: docker/setup-qemu-action@v3
+
       - uses: docker/setup-buildx-action@v3
 
-      # The Dockerfile builds and tests the same tree itself, so the image is
-      # never assembled from a tree that failed the suite.
+      # The Dockerfile builds and tests the same tree itself, so the image
+      # is never assembled from a tree that failed the suite. The suite
+      # runs once (it targets the builder) and both platforms reuse that
+      # pass; only the build step differs per platform.
       - name: Push the image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: |
             ghcr.io/${{ steps.repo.outputs.name }}:${{ github.ref_name }}
             ghcr.io/${{ steps.repo.outputs.name }}:latest
