@@ -37,7 +37,7 @@ func (s *Server) writeFSError(w http.ResponseWriter, r *http.Request, err error)
 	case errors.Is(err, fs.ErrForbidden):
 		writeError(w, http.StatusForbidden, "you do not have access to this folder")
 	case errors.Is(err, fs.ErrReserved):
-		writeError(w, http.StatusConflict, "names beginning with .upload- are reserved while uploads are in flight")
+		writeError(w, http.StatusConflict, "that name is reserved by the server (a .trash directory, or a .upload- file while uploads are in flight)")
 	case errors.Is(err, fs.ErrNotExist):
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, fs.ErrNotDir):
@@ -525,4 +525,40 @@ func (s *Server) handleTrashDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logf("trash deleted", "user", u.Username, "name", name)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+type copyRequest struct {
+	From  string `json:"from"`
+	ToDir string `json:"to_dir"`
+	Name  string `json:"name"`
+}
+
+// handleCopy duplicates an entry. An empty name copies under the source's
+// own name, so a copy with no name and no destination would land on the
+// source and refuses; the UI therefore proposes a distinct name. Anything
+// already at the destination is never replaced, which is the behaviour
+// upload and rename do not share.
+func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+
+	var req copyRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if strings.TrimSpace(req.From) == "" {
+		writeError(w, http.StatusBadRequest, "missing source path")
+		return
+	}
+	if req.ToDir == "" {
+		req.ToDir = path.Dir(fs.Clean(req.From))
+	}
+
+	entry, err := s.files.Copy(u, req.From, req.ToDir, req.Name)
+	if err != nil {
+		s.writeFSError(w, r, err)
+		return
+	}
+	s.logf("copy", "user", u.Username, "from", req.From, "to", entry.Path)
+	writeJSON(w, http.StatusOK, entry)
 }

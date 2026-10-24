@@ -109,7 +109,9 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 
 	// Disabling an account must take effect now, not when its cookie expires.
 	if req.Disabled != nil && *req.Disabled {
-		s.sessions.EndAllForUser(id)
+		if endErr := s.sessions.EndAllForUser(id); endErr != nil {
+			s.logError("could not save session revocation", "user", pub.Username, "err", endErr)
+		}
 	}
 
 	actor := userFrom(r.Context())
@@ -136,7 +138,9 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		s.writeUserError(w, r, err)
 		return
 	}
-	s.sessions.EndAllForUser(id)
+	if endErr := s.sessions.EndAllForUser(id); endErr != nil {
+		s.logError("could not save session revocation", "id", id, "err", endErr)
+	}
 
 	actor := userFrom(r.Context())
 	if u, err := s.users.Get(id); err == nil {
@@ -152,7 +156,9 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		s.writeUserError(w, r, err)
 		return
 	}
-	s.sessions.EndAllForUser(id)
+	if endErr := s.sessions.EndAllForUser(id); endErr != nil {
+		s.logError("could not save session revocation", "id", id, "err", endErr)
+	}
 
 	actor := userFrom(r.Context())
 	s.logf("user deleted", "actor", actor.Username, "id", id)

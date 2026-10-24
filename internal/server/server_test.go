@@ -1399,3 +1399,49 @@ func TestSessionsListAndRevoke(t *testing.T) {
 		t.Error("erin was handed the admin's session id")
 	}
 }
+
+func TestCopyEndpoint(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	// A copy into a named directory under a new name.
+	resp := h.post(client, "/api/fs/copy", `{"from":"/docs/notes.txt","to_dir":"/","name":"notes-paste.txt"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("copy = %d, want 200: %v", resp.StatusCode, decodeMsg(resp))
+	}
+	resp.Body.Close()
+	if _, err := os.Stat(filepath.Join(h.root, "notes-paste.txt")); err != nil {
+		t.Fatalf("copy missing on disk: %v", err)
+	}
+
+	// An empty to_dir defaults to the source's own directory. An empty name
+	// would land on the source itself and refuses, so callers propose a
+	// distinct name instead.
+	resp = h.post(client, "/api/fs/copy", `{"from":"/docs/notes.txt","name":"notes-again.txt"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("copy with default dir = %d, want 200: %v", resp.StatusCode, decodeMsg(resp))
+	}
+	resp.Body.Close()
+	if _, err := os.Stat(filepath.Join(h.root, "docs", "notes-again.txt")); err != nil {
+		t.Fatalf("default-dir copy missing on disk: %v", err)
+	}
+
+	// An existing destination refuses rather than being replaced.
+	resp = h.post(client, "/api/fs/copy", `{"from":"/docs/notes.txt","to_dir":"/","name":"notes-paste.txt"}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("copy onto existing name = %d, want 409", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// A request without a source path is a bad request.
+	resp = h.post(client, "/api/fs/copy", `{"to_dir":"/"}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("copy without source = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func decodeMsg(resp *http.Response) string {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return string(body)
+}

@@ -18,6 +18,7 @@ package fs
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -263,4 +264,226 @@ func childPath(base, rel string) string {
 		return Clean(base)
 	}
 	return Clean(base + "/" + rel)
+}
+
+// Copy duplicates an entry: a file becomes an independent file with the same
+// bytes, a folder becomes an independent subtree with the same shape. Write
+// access on the destination directory and read on the source is required; the
+// destination refuses to replace anything already sitting there, so copying
+// never destroys someone else's work.
+//
+// The work happens under a reserved temporary name and is renamed into place
+// only when it completes, so a copy that dies halfway leaves nothing behind
+// and callers never see a half-written duplicate under its real name.
+//
+// Symlinks inside the tree are resolved and their content copied; a folder
+// symlink is recorded but not followed deeply, so a link-loops layout cannot
+// spin here. Unusual files (fifos, devices, sockets) are skipped.
+func (f *FS) Copy(u *auth.User, from, toDir, name string) (Entry, error) {
+	fromVP := Clean(from)
+	if isReservedName(path.Base(fromVP)) {
+		return Entry{}, ErrReserved
+	}
+	if name == "" {
+		name = path.Base(fromVP)
+	}
+	if isReservedName(name) {
+		return Entry{}, ErrReserved
+	}
+
+	srcReal, err := f.Resolve(u, fromVP, auth.AccessRead)
+	if err != nil {
+		return Entry{}, err
+	}
+	if srcReal == f.realRoot {
+		return Entry{}, fmt.Errorf("fs: refusing to copy the root directory")
+	}
+	dstDirReal, err := f.Resolve(u, Clean(toDir), auth.AccessWrite)
+	if err != nil {
+		return Entry{}, err
+	}
+
+	dstVP, err := Join(toDir, name)
+	if err != nil {
+		return Entry{}, err
+	}
+	dst := filepath.Join(dstDirReal, name)
+	if !within(f.realRoot, resolveFor(dst)) {
+		return Entry{}, ErrForbidden
+	}
+	// A copy is a create, not a replace: an existing destination is refused
+	// rather than overwritten. (A directory rename that lands on a non-empty
+	// target fails in the kernel itself, so this window stays narrow.)
+	if _, lerr := os.Lstat(dst); lerr == nil {
+		return Entry{}, os.ErrExist
+	}
+
+	dstInfo, err := os.Lstat(srcReal)
+	if err != nil {
+		return Entry{}, err
+	}
+	// Both kinds stage under the reserved prefix, invisible to listings and
+	// unreachable through the API, and both finalise with a rename.
+	if dstInfo.IsDir() {
+		tmp, merr := os.MkdirTemp(dstDirReal, uploadTempPrefix+"copy-")
+		if merr != nil {
+			return Entry{}, merr
+		}
+		if err := f.copyWalk(srcReal, tmp); err != nil {
+			os.RemoveAll(tmp)
+			return Entry{}, err
+		}
+		if err := os.Rename(tmp, dst); err != nil {
+			os.RemoveAll(tmp)
+			return Entry{}, err
+		}
+	} else {
+		rel, ok := relOfReal(f.realRoot, srcReal)
+		if !ok {
+			return Entry{}, ErrForbidden
+		}
+		file, aerr := os.CreateTemp(dstDirReal, uploadTempPrefix+"copy-*")
+		if aerr != nil {
+			return Entry{}, aerr
+		}
+		tmpName := file.Name()
+		serr := f.copyFileInto(file, rel, dstInfo)
+		cerr := file.Close()
+		if err := errors.Join(serr, cerr); err != nil {
+			os.Remove(tmpName)
+			return Entry{}, err
+		}
+		if err := os.Rename(tmpName, dst); err != nil {
+			os.Remove(tmpName)
+			return Entry{}, err
+		}
+	}
+
+	info, err := os.Lstat(dst)
+	if err != nil {
+		return Entry{}, err
+	}
+	return Entry{
+		Name:    name,
+		Path:    dstVP,
+		IsDir:   info.IsDir(),
+		Size:    info.Size(),
+		ModTime: info.ModTime(),
+		Mode:    info.Mode().String(),
+		Access:  u.EffectiveLevel(dstVP).String(),
+	}, nil
+}
+
+// relOfReal expresses a real path relative to the containment root, in slash
+// form, for openInside; ok is false when the path is not under root.
+func relOfReal(root, real string) (string, bool) {
+	rel, err := filepath.Rel(root, real)
+	if err != nil {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
+}
+
+// copyFileInto streams a source file's bytes (by its slash path relative to
+// the containment root) into an already-open destination file, keeping the
+// source's regular mode bits. The open re-walks the path through openat2, so
+// a raced symlink cannot reach outside while bytes move.
+func (f *FS) copyFileInto(dst *os.File, rel string, info os.FileInfo) error {
+	if rel == "" {
+		return fmt.Errorf("fs: copy source escapes the root")
+	}
+	src, err := openInside(f.realRoot, rel, os.O_RDONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	if _, err := io.Copy(dst, src); err != nil {
+		return err
+	}
+	return os.Chmod(dst.Name(), info.Mode()&0o777)
+}
+
+// copyWalk mirrors src into dst: same names, same regular-file bytes, dir
+// modes carried over, reserved names and folder symlinks left out.
+func (f *FS) copyWalk(srcDir, dstDir string) error {
+	des, err := os.ReadDir(srcDir)
+	if err != nil {
+		return err
+	}
+	for _, de := range des {
+		name := de.Name()
+		if isReservedName(name) {
+			continue // machinery never duplicates
+		}
+		srcPath := filepath.Join(srcDir, name)
+		dstPath := filepath.Join(dstDir, name)
+
+		info, ierr := de.Info()
+		if ierr != nil {
+			continue // vanished mid-copy, like the zip walker
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			resolved, rerr := resolveExisting(srcPath)
+			if rerr != nil || !within(f.realRoot, resolved) {
+				continue // invisible to listings, invisible to copies
+			}
+			target, terr := os.Stat(resolved)
+			if terr != nil {
+				continue
+			}
+			if target.IsDir() {
+				continue // do not climb through folder links: cycles
+			}
+			rel, rok := relOfReal(f.realRoot, resolved)
+			if !rok {
+				return ErrForbidden
+			}
+			out, aerr := os.CreateTemp(dstDir, uploadTempPrefix+"copy-*")
+			if aerr != nil {
+				return aerr
+			}
+			serr := f.copyFileInto(out, rel, target)
+			cerr := out.Close()
+			if err := errors.Join(serr, cerr); err != nil {
+				os.Remove(out.Name())
+				return err
+			}
+			if err := os.Rename(out.Name(), dstPath); err != nil {
+				os.Remove(out.Name())
+				return err
+			}
+			continue
+		}
+		if info.IsDir() {
+			if err := os.MkdirAll(dstPath, info.Mode()&0o777); err != nil {
+				return err
+			}
+			if err := f.copyWalk(srcPath, dstPath); err != nil {
+				return err
+			}
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			continue // fifos, devices, sockets: not archive material
+		}
+		rel, rok := relOfReal(f.realRoot, srcPath)
+		if !rok {
+			return ErrForbidden
+		}
+		out, aerr := os.CreateTemp(dstDir, uploadTempPrefix+"copy-*")
+		if aerr != nil {
+			return aerr
+		}
+		serr := f.copyFileInto(out, rel, info)
+		cerr := out.Close()
+		if err := errors.Join(serr, cerr); err != nil {
+			os.Remove(out.Name())
+			return err
+		}
+		if err := os.Rename(out.Name(), dstPath); err != nil {
+			os.Remove(out.Name())
+			return err
+		}
+	}
+	return nil
 }

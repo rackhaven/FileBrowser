@@ -107,7 +107,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // it was copied out of the browser.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
-		s.sessions.End(c.Value)
+		if endErr := s.sessions.End(c.Value); endErr != nil {
+			// The cookie is cleared regardless; only the durable row lingers.
+			s.logError("logout save failed", "err", endErr)
+		}
 	}
 	s.clearSessionCookie(w, r)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -162,7 +165,9 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Keep this device signed in, drop every other one.
-	s.sessions.EndAllForUser(u.ID)
+	if endErr := s.sessions.EndAllForUser(u.ID); endErr != nil {
+		s.logError("could not save session revocation", "user", u.Username, "err", endErr)
+	}
 	if newSess, err := s.sessions.Start(u.ID); err == nil {
 		s.setSessionCookie(w, r, newSess.Token, newSess.ExpiresAt)
 	}
@@ -182,16 +187,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// sessionHint is the short recognisable fragment of a session token shown to
-// its owner. Six characters are enough to tell two sessions apart on one
-// account and are far from enough to impersonate anyone.
-func sessionHint(tok string) string {
-	const hintChars = 6
-	if len(tok) <= hintChars {
-		return tok
-	}
-	return tok[:hintChars] + "..."
-}
+// sessionHint was folded into the auth package: the hint travels with the
+// session so reloaded ones can be recognised too.
 
 type sessionView struct {
 	ID       string `json:"id"`
@@ -213,7 +210,7 @@ func (s *Server) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 			ID:       sess.PublicID,
 			Created:  sess.CreatedAt.UTC().Format(time.RFC3339),
 			LastSeen: sess.LastSeen.UTC().Format(time.RFC3339),
-			Hint:     sessionHint(sess.Token),
+			Hint:     sess.Hint,
 			Current:  current != nil && sess.PublicID == current.PublicID,
 		})
 	}

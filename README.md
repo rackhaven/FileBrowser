@@ -117,7 +117,7 @@ Access is a list of rules per user. Each rule is a folder and a level:
 | Level   | Can do                                              |
 | ------- | --------------------------------------------------- |
 | `read`  | list folders, download files                         |
-| `write` | all of `read`, plus upload, rename, delete           |
+| `write` | all of `read`, plus upload, rename, copy, delete     |
 | `admin` | all of `write`, plus administer that subtree         |
 
 A rule applies to the folder **and everything under it**. The most specific
@@ -280,7 +280,7 @@ file.
 | --------------- | ---------------------- | -------------- | ----------------------------------- |
 | `-listen`       | `FB_LISTEN`            | `0.0.0.0:8080` | bind address                        |
 | `-root`         | `FB_ROOT`              | `/srv/files`   | the one directory that is exposed   |
-| `-data`         | `FB_DATA_DIR`          | `/data`        | holds `users.json`                  |
+| `-data`         | `FB_DATA_DIR`          | `/data`        | holds `users.json` and `sessions.json` |
 | `-config`       | —                      | —              | YAML config file                    |
 |                | `FB_SESSION_TTL`       | `168h`         | how long a sign-in lasts            |
 |                | `FB_TRUST_PROXY_HEADERS` | `false`      | honour `X-Forwarded-Proto` and `X-Forwarded-For` |
@@ -341,8 +341,11 @@ except loopback.
 
 ### Things worth knowing
 
-- **Sessions are in memory.** A restart signs everyone out. The user database
-  survives; live sessions do not.
+- **Sessions survive a restart.** They live on the server and are written to
+  `sessions.json` in the data directory, beside the user database, on every
+  change. Only token hashes are stored, never the live tokens themselves, so
+  the file says nothing a stolen cookie needs. Delete it (or lose the whole
+  data directory) and every device is signed out on the spot.
 - **You can sign devices out yourself, one at a time.** The menu lists every
   live session of your account with when it was created and last used, and you
   can revoke any of the others. A stolen cookie dies as soon as you click.
@@ -356,6 +359,10 @@ except loopback.
   Caddyfile does exactly that).
 - **Uploads land in a temporary file and are renamed into place**, so an
   interrupted upload never leaves a truncated file that looks complete.
+- **Copies behave the same way**, and a copy is a create, not a replace: an
+  app already sitting at the destination refuses to be overwritten. Folder
+  copies walk the tree while links and reserved names behave exactly as in a
+  listing, so nothing hidden can leak into a duplicate.
 - **Nothing is encrypted at rest** beyond what your filesystem does. If the disk
   is stolen, the files are readable. Use disk encryption (LUKS, BitLocker) if
   that matters.
@@ -484,6 +491,7 @@ noted.
 | `PUT` | `/api/fs/upload?path=/dir&name=f.txt` | raw body streamed to disk |
 | `POST` | `/api/fs/mkdir` | `{path, name}` |
 | `POST` | `/api/fs/rename` | `{from, to_dir, new_name}` |
+| `POST` | `/api/fs/copy` | `{from, to_dir, name}`; a sibling duplicate. `to_dir` and `name` are optional: the copy then lands beside the source, under the name the UI proposes. An existing destination refuses (409), never replaced |
 | `POST` | `/api/fs/delete?path=/a.txt` | recursive for folders; the entry moves to the trash, see below |
 | `GET` | `/api/fs/trash` | deleted items the caller may act on, `{entries}` |
 | `POST` | `/api/fs/restore` | `{name}`; put a trashed entry back where it came from |
