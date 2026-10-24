@@ -416,3 +416,61 @@ func SafeTrashName(name string) string {
 	}
 	return name
 }
+
+// TrashSweep carries out retention: entries whose sidecar record proves
+// they have been in the trash longer than maxAge are erased, item and
+// record together. It returns how many entries it removed.
+//
+// Two things are deliberately out of scope. Entries without a record (a
+// crash, or an out-of-band drop into the trash directory) have no
+// knowable age, so they are left for the hands-on wipe rather than
+// guessed at. And recordless sidecars, records with nothing matching
+// their item, are invisible housekeeping noise: the sweep lets them be,
+// since they hold no content.
+func (f *FS) TrashSweep(maxAge time.Duration) (int, error) {
+	if maxAge <= 0 {
+		return 0, nil
+	}
+	trash := filepath.Join(f.root, trashDirName)
+	des, err := os.ReadDir(trash)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil // no trash yet: nothing to retain
+		}
+		return 0, err
+	}
+
+	cutoff := time.Now().UTC().Add(-maxAge)
+	type old struct{ item, record string }
+	var doomed []old
+	for _, de := range des {
+		name := de.Name()
+		if name != "" && name[0] == '.' {
+			continue // records go with their item, one pass, one way
+		}
+		id := trashIDOf(name)
+		if id == "" {
+			continue // no record, no age, no guess
+		}
+		meta, ok := f.readTrashMeta(trash, id)
+		if !ok {
+			continue
+		}
+		if meta.DeletedAt.After(cutoff) {
+			continue // young enough to keep
+		}
+		doomed = append(doomed, old{item: name, record: "." + id + ".json"})
+	}
+
+	removed := 0
+	for _, d := range doomed {
+		if err := os.RemoveAll(filepath.Join(trash, d.item)); err != nil {
+			return removed, err
+		}
+		if err := os.Remove(filepath.Join(trash, d.record)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
+}

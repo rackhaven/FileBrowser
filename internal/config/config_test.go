@@ -16,8 +16,10 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestThumbCacheDefaultsBesideDataDir(t *testing.T) {
@@ -49,5 +51,63 @@ func TestThumbCacheDefaultsBesideDataDir(t *testing.T) {
 	}
 	if cfg.ThumbCache != "/srv/thumb-cache" {
 		t.Errorf("ThumbCache = %q, want the explicit override", cfg.ThumbCache)
+	}
+}
+
+func TestTrashTTLDefaultsAndOverrides(t *testing.T) {
+	// Default: thirty days, so the drawer is a safety net, not an archive.
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TrashTTL != 30*24*time.Hour {
+		t.Errorf("TrashTTL default = %v, want 720h", cfg.TrashTTL)
+	}
+
+	// The environment carries durations like FB_SESSION_TTL does.
+	t.Setenv("FB_TRASH_TTL", "48h")
+	cfg, err = Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TrashTTL != 48*time.Hour {
+		t.Errorf("TrashTTL from env = %v, want 48h", cfg.TrashTTL)
+	}
+
+	// Zero opts out; negative is a typo, so it fails loudly.
+	t.Setenv("FB_TRASH_TTL", "0s")
+	cfg, err = Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TrashTTL != 0 {
+		t.Errorf("TrashTTL = %v, want zero", cfg.TrashTTL)
+	}
+	t.Setenv("FB_TRASH_TTL", "yesterday")
+	if _, err := Load(""); err == nil {
+		t.Error("a malformed FB_TRASH_TTL must be an error")
+	}
+
+	// The YAML file sets it too, and the environment still wins.
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	yaml := "listen: 0.0.0.0:9090\nroot: /srv\ndata_dir: /var/lib/fb\ntrash_ttl: 168h\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FB_TRASH_TTL", "") // quietly ignored: the file value must reach through
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TrashTTL != 7*24*time.Hour {
+		t.Errorf("TrashTTL from file = %v, want 168h", cfg.TrashTTL)
+	}
+	t.Setenv("FB_TRASH_TTL", "1h")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TrashTTL != time.Hour {
+		t.Errorf("TrashTTL env over file = %v, want 1h", cfg.TrashTTL)
 	}
 }

@@ -16,11 +16,14 @@
 package fs
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/rackhaven/filebrowser/internal/auth"
 )
@@ -435,5 +438,141 @@ func TestCopySymlinkPolicy(t *testing.T) {
 		if _, err := os.Lstat(filepath.Join(root, filepath.FromSlash(rel))); !os.IsNotExist(err) {
 			t.Errorf("%s should not be in the copy: %v", rel, err)
 		}
+	}
+}
+
+func TestTrashSweepErasesByAge(t *testing.T) {
+	f := newTestFS(t)
+	root := mustRoot(f)
+	u := adminUser()
+
+	mk := func(rel string) {
+		writeFile(t, root, rel, "x")
+		if err := f.Remove(u, "/"+rel); err != nil {
+			t.Fatalf("Remove %s: %v", rel, err)
+		}
+	}
+	mk("old.txt")
+	mk("young.txt")
+	mk("guess.txt") // its record gets wiped below, becoming recordless
+
+	// Backdate one sidecar well past the window and blank another's
+	// DeletedAt, treating it as older than every window.
+	trash := filepath.Join(root, trashDirName)
+	oldItem := ""
+	for _, entry := range mustTrashList(t, f) {
+		switch {
+		case strings.HasSuffix(entry.Name, "-old.txt"):
+			oldItem = entry.Name
+			backdateTrashRecord(t, trash, entry.Name, 40*24*time.Hour)
+		case strings.HasSuffix(entry.Name, "-guess.txt"):
+			// A record with no DeletedAt field: zero answers as ancient.
+			id := trashIDOf(entry.Name)
+			if err := os.WriteFile(filepath.Join(trash, "."+id+".json"), []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if oldItem == "" {
+		t.Fatal("the old entry did not make it to the trash")
+	}
+	// A recordless item: an entry whose sidecar vanishes is skipped by
+	// listings and must also be skipped by the sweep, never guessed at.
+	if err := os.MkdirAll(filepath.Join(root, "parked"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Remove(u, "/parked"); err != nil {
+		t.Fatal(err)
+	}
+	var parked string
+	for _, entry := range mustTrashList(t, f) {
+		if strings.HasSuffix(entry.Name, "-parked") {
+			parked = entry.Name
+			id := trashIDOf(entry.Name)
+			if err := os.Remove(filepath.Join(trash, "."+id+".json")); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	if parked == "" {
+		t.Fatal("the recordless entry did not make it to the trash")
+	}
+
+	n, err := f.TrashSweep(30 * 24 * time.Hour)
+	if err != nil {
+		t.Fatalf("TrashSweep: %v", err)
+	}
+	// Two: the backdated one, and the one whose record lost its DeletedAt
+	// (zero answers as ancient). The recordless parked entry is out of
+	// the sweep's reach on purpose: no record, no knowable age, no guess.
+	if n != 2 {
+		t.Fatalf("sweep removed %d entries, want 2", n)
+	}
+	// The old one is gone, item and record.
+	if _, serr := os.Stat(filepath.Join(trash, oldItem)); !os.IsNotExist(serr) {
+		t.Errorf("the old entry survived: %v", serr)
+	}
+	// The young one is untouched.
+	for _, entry := range mustTrashList(t, f) {
+		if !strings.HasSuffix(entry.Name, "-young.txt") {
+			t.Errorf("unexpected survivor in the listing: %q", entry.Name)
+		}
+	}
+	// The recordless one is still parked under its own name.
+	if _, serr := os.Stat(filepath.Join(trash, parked)); serr != nil {
+		t.Errorf("the recordless entry was not left alone: %v", serr)
+	}
+
+	// A zero window means retention is off: the sweep is a no-op.
+	if n, err := f.TrashSweep(0); err != nil || n != 0 {
+		t.Fatalf("off retention did not pass through untouched: n=%d err=%v", n, err)
+	}
+	if len(mustTrashList(t, f)) != 1 {
+		t.Error("a zero window removed something")
+	}
+}
+
+func TestTrashSweepIsANoOpWithoutATrashDirectory(t *testing.T) {
+	f := newTestFS(t) // nothing deleted yet
+	if n, err := f.TrashSweep(24 * time.Hour); err != nil || n != 0 {
+		t.Fatalf("sweep on quiet server: n=%d err=%v", n, err)
+	}
+}
+
+// ------------------------------------------------------------ helpers ---
+
+func mustTrashList(t *testing.T, f *FS) []TrashEntry {
+	t.Helper()
+	entries, err := f.TrashList(adminUser())
+	if err != nil {
+		t.Fatalf("TrashList: %v", err)
+	}
+	return entries
+}
+
+// backdateTrashRecord rewrites a sidecar so the entry reads as if it had
+// been deleted that long ago.
+func backdateTrashRecord(t *testing.T, trash, item string, age time.Duration) {
+	t.Helper()
+	id := trashIDOf(item)
+	if id == "" {
+		t.Fatalf("no id in %q", item)
+	}
+	raw, err := os.ReadFile(filepath.Join(trash, "."+id+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta TrashMeta
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatal(err)
+	}
+	meta.DeletedAt = time.Now().UTC().Add(-age)
+	raw, err = json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(trash, "."+id+".json"), raw, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -39,6 +39,14 @@ session_ttl: 168h   # 7 days
 # HttpOnly and SameSite=Strict either way.
 trust_proxy_headers: false
 
+# --- Deleted items -----------------------------------------------------------
+# How long entries stay in the trash before the server erases them, quietly
+# and once a day. Thirty days by default. Zero (0s or similar) disables the
+# server's eraser: the drawer then keeps everything until someone erases it
+# or wipes the drawer as an administrator.
+#
+# trash_ttl: 720h
+
 # --- Uploads -----------------------------------------------------------------
 # Largest accepted upload, in bytes. The body streams to disk, so this guards
 # space rather than memory. Defaults to 32 GiB (34359738368).
