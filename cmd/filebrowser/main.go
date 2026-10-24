@@ -157,7 +157,12 @@ func runServe(args []string) error {
 		return err
 	}
 
-	sessions := auth.NewSessions(cfg.SessionTTL)
+	// sessions.json lives beside the user database: devices stay signed in
+	// across restarts, and only token hashes are ever written.
+	sessions, err := auth.OpenSessions(filepath.Join(cfg.DataDir, "sessions.json"), cfg.SessionTTL)
+	if err != nil {
+		return err
+	}
 	srv := server.New(server.Options{
 		Config: server.Config{
 			TrustProxyHeaders: cfg.TrustProxyHeaders,

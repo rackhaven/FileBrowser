@@ -280,7 +280,7 @@ file.
 | --------------- | ---------------------- | -------------- | ----------------------------------- |
 | `-listen`       | `FB_LISTEN`            | `0.0.0.0:8080` | bind address                        |
 | `-root`         | `FB_ROOT`              | `/srv/files`   | the one directory that is exposed   |
-| `-data`         | `FB_DATA_DIR`          | `/data`        | holds `users.json`                  |
+| `-data`         | `FB_DATA_DIR`          | `/data`        | holds `users.json` and `sessions.json` |
 | `-config`       | —                      | —              | YAML config file                    |
 |                | `FB_SESSION_TTL`       | `168h`         | how long a sign-in lasts            |
 |                | `FB_TRUST_PROXY_HEADERS` | `false`      | honour `X-Forwarded-Proto` and `X-Forwarded-For` |
@@ -341,8 +341,11 @@ except loopback.
 
 ### Things worth knowing
 
-- **Sessions are in memory.** A restart signs everyone out. The user database
-  survives; live sessions do not.
+- **Sessions survive a restart.** They live on the server and are written to
+  `sessions.json` in the data directory, beside the user database, on every
+  change. Only token hashes are stored, never the live tokens themselves, so
+  the file says nothing a stolen cookie needs. Delete it (or lose the whole
+  data directory) and every device is signed out on the spot.
 - **You can sign devices out yourself, one at a time.** The menu lists every
   live session of your account with when it was created and last used, and you
   can revoke any of the others. A stolen cookie dies as soon as you click.

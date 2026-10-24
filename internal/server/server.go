@@ -136,13 +136,14 @@ func (s *Server) logError(msg string, args ...any) {
 // requireAuth wraps a handler so it only runs for a logged-in user.
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		tok, err := r.Cookie(sessionCookie)
-		if err != nil || tok.Value == "" {
+		cookie, err := r.Cookie(sessionCookie)
+		if err != nil || cookie.Value == "" {
 			writeError(w, http.StatusUnauthorized, "authentication required")
 			return
 		}
+		tok := cookie.Value
 
-		sess := s.sessions.Lookup(tok.Value)
+		sess := s.sessions.Lookup(tok)
 		if sess == nil {
 			s.clearSessionCookie(w, r) // stop the browser resending a dead token
 			writeError(w, http.StatusUnauthorized, "session expired, please sign in again")
@@ -152,15 +153,17 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		user, err := s.users.Get(sess.UserID)
 		if err != nil || user.Disabled {
 			// Account deleted or disabled while this session was live.
-			s.sessions.End(sess.Token)
+			if endErr := s.sessions.End(tok); endErr != nil {
+				s.logError("could not end a dead session", "err", endErr)
+			}
 			s.clearSessionCookie(w, r)
 			writeError(w, http.StatusUnauthorized, "account is no longer active")
 			return
 		}
 
-		s.sessions.Touch(sess.Token) // sliding expiry for active users
+		s.sessions.Touch(tok) // sliding expiry for active users
 		ctx := context.WithValue(r.Context(), ctxUser, user)
-		ctx = context.WithValue(ctx, ctxToken, sess.Token)
+		ctx = context.WithValue(ctx, ctxToken, tok)
 		ctx = context.WithValue(ctx, ctxSess, sess)
 		next(w, r.WithContext(ctx))
 	}

@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -525,5 +527,160 @@ func TestPublicIDsDistinctAcrossSessions(t *testing.T) {
 		if n != 1 {
 			t.Fatalf("public id %q repeats on %d live sessions", id, n)
 		}
+	}
+}
+
+func TestSessionsPersistAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+
+	s1, err := OpenSessions(path, time.Hour)
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	end, _ := s1.Start("user-1")
+	keep, _ := s1.Start("user-1")
+	_, _ = s1.Start("user-1")
+	if err := s1.End(end.Token); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+
+	// The file holds recognisable records but no raw tokens.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("sessions file: %v", err)
+	}
+	if strings.Contains(string(raw), keep.Token) {
+		t.Error("a raw session token was written to disk")
+	}
+	if !strings.Contains(string(raw), keep.PublicID) {
+		t.Error("the public id did not make it to disk")
+	}
+
+	// Reopening continues the same table: one live session, reachable by its
+	// cookie, gone for the one that was ended.
+	s2, err := OpenSessions(path, time.Hour)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	got := s2.Lookup(keep.Token)
+	if got == nil || got.UserID != "user-1" {
+		t.Fatal("a persisted session must come back after reopen")
+	}
+	if got.Token != "" {
+		t.Errorf("a reloaded session carries a raw token: %q", got.Token)
+	}
+	if s2.Lookup(end.Token) != nil {
+		t.Error("an ended session came back from disk")
+	}
+	if len(s2.ListForUser("user-1")) != 2 {
+		t.Fatalf("reopened table holds %d sessions, want 2", len(s2.ListForUser("user-1")))
+	}
+
+	// Revocation after a reopen is durable too.
+	if err := s2.EndByID("user-1", keep.PublicID); err != nil {
+		t.Fatalf("EndByID after reopen: %v", err)
+	}
+	s3, _ := OpenSessions(path, time.Hour)
+	if s3.Lookup(keep.Token) != nil {
+		t.Error("a session revoked after reopen survived the save")
+	}
+}
+
+func TestOpenSessionsPrunesAndRefusesCorruption(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	now := time.Now()
+	dead := fmt.Sprintf(`{"token_hash":"hash-dead","user_id":"u","expires_at":%q}`,
+		now.Add(-time.Hour).Format(time.RFC3339))
+	alive := fmt.Sprintf(`{"token_hash":"hash-alive","user_id":"u","public_id":"p1",
+		"created_at":%q,"last_seen":%q,"expires_at":%q}`,
+		now.Add(-time.Minute).Format(time.RFC3339),
+		now.Format(time.RFC3339),
+		now.Add(time.Hour).Format(time.RFC3339))
+	broken := fmt.Sprintf(`{"token_hash":"","user_id":"","expires_at":%q}`,
+		now.Add(time.Hour).Format(time.RFC3339))
+
+	// Empty-hash junk and expired rows are dropped; valid rows load.
+	if err := os.WriteFile(path, []byte("["+dead+","+alive+","+broken+"]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenSessions(path, time.Hour)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if s.Count() != 1 {
+		t.Fatalf("table holds %d sessions, want the one live row", s.Count())
+	}
+	if got := s.ListForUser("u"); len(got) != 1 || got[0].PublicID != "p1" {
+		t.Fatalf("loaded list = %v", got)
+	}
+
+	// A file that is not JSON at all is a loud problem, not silent loss.
+	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenSessions(path, time.Hour); err == nil {
+		t.Fatal("corrupt sessions file must be a startup error")
+	}
+}
+
+func TestSessionsSaveFailureRollsBack(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	s, err := OpenSessions(path, time.Hour)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	first, err := s.Start("user-1")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	second, _ := s.Start("user-1")
+
+	// Break every further save in a way that fails for root exactly as it
+	// does for anyone else: the save's stepped-aside temporary file cannot
+	// be created, because its name is already a directory. (A chmod-based
+	// block would not stop root, and the image job runs the suite as root.)
+	blocker := path + ".tmp"
+	if err := os.Mkdir(blocker, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Start("user-1"); err == nil {
+		t.Fatal("Start with a dead save must fail, not pretend")
+	}
+	if err := s.End(first.Token); err == nil {
+		t.Fatal("End with a dead save must fail, not pretend")
+	}
+	if s.Lookup(first.Token) == nil {
+		t.Error("a failed revoke must leave the session live, memory matching the file")
+	}
+	if err := s.EndAllForUser("user-1"); err == nil {
+		t.Fatal("EndAllForUser with a dead save must fail, not pretend")
+	}
+	if s.Lookup(second.Token) == nil {
+		t.Error("a failed wipe must leave every session live")
+	}
+
+	// Unblock: the pending changes land now, and the revocations complete.
+	if err := os.Remove(blocker); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EndAllForUser("user-1"); err != nil {
+		t.Fatalf("EndAllForUser after the save healed: %v", err)
+	}
+	if s.Lookup(first.Token) != nil || s.Lookup(second.Token) != nil {
+		t.Error("revocations did not complete after the save healed")
+	}
+
+	// Coverage under root in CI makes aiming at permission bits unreliable;
+	// see the blocker above. A quick End on an intact table completes too.
+	third, err := s.Start("user-1")
+	if err != nil {
+		t.Fatalf("Start after repair: %v", err)
+	}
+	if err := s.End(third.Token); err != nil {
+		t.Fatalf("End on a healthy table: %v", err)
 	}
 }
