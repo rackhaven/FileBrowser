@@ -1445,3 +1445,259 @@ func decodeMsg(resp *http.Response) string {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	return string(body)
 }
+
+func TestDuplicateNamesAnswerConflict(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	// Creating a folder over an existing name is an everyday slip: it must
+	// read as a conflict, never as an internal error.
+	resp := h.post(client, "/api/fs/mkdir", `{"path":"/","name":"docs"}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("mkdir over existing folder = %d, want 409", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Uploading onto a directory name is the same kind of refusal. The
+	// conflict short-circuits before the body is read, so an empty body is
+	// expected rather than a bug.
+	resp = h.putBody(client, "/api/fs/upload?path=/&name=photos", "application/octet-stream", "JPEGDATA")
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("upload onto a directory name = %d, want 409", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func (h *harness) putBody(client *http.Client, path, contentType, body string) *http.Response {
+	h.t.Helper()
+	req, err := http.NewRequest(http.MethodPut, h.server.URL+path, strings.NewReader(body))
+	if err != nil {
+		h.t.Fatalf("PUT %s: %v", path, err)
+	}
+	req.Header.Set("Content-Type", contentType)
+	resp, err := client.Do(req)
+	if err != nil {
+		h.t.Fatalf("PUT %s: %v", path, err)
+	}
+	return resp
+}
+
+func TestForcedPasswordChangeBlocksEverythingElse(t *testing.T) {
+	h := newHarness(t)
+
+	// An admin resets dave's password: the next sign-in must change it.
+	if _, err := h.users.Create("dave", "password123", false, []auth.Grant{
+		{Path: "/", Level: auth.AccessRead},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.users.SetPassword(h.lookup(t, "dave").ID, "temp-password", true); err != nil {
+		t.Fatal(err)
+	}
+	client := h.login("dave", "temp-password")
+
+	// Reading files is refused, with a marker the UI reacts to.
+	resp := h.get(client, "/api/fs/list?path=/")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("list while forced change = %d, want 403", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	resp.Body.Close()
+	if !strings.Contains(string(body), `"must_change_password":true`) {
+		t.Errorf("refusal does not carry the marker: %s", body)
+	}
+	// Writing is equally refused.
+	resp = h.post(client, "/api/fs/mkdir", `{"path":"/","name":"x"}`)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("mkdir while forced change = %d, want 403", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Authentication housekeeping still answers.
+	resp = h.get(client, "/api/auth/me")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("me while forced change = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = h.post(client, "/api/auth/password", `{"current_password":"temp-password","new_password":"stronger-pass"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("password change = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// The same session cookie survives the rotation and now works.
+	resp = h.get(client, "/api/fs/list?path=/")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("list after change = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// A fresh sign-in for the same account says nothing needs changing.
+	data := h.loginJSON(t, client, "dave", "stronger-pass")
+	if data["must_change_password"] == true {
+		t.Error("a changed password must not carry the forced flag")
+	}
+}
+
+func (h *harness) loginJSON(t *testing.T, client *http.Client, user, pass string) map[string]any {
+	t.Helper()
+	resp := h.post(client, "/api/auth/login", `{"username":"`+user+`","password":"`+pass+`"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login %s: %d", user, resp.StatusCode)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func (h *harness) lookup(t *testing.T, username string) *auth.User {
+	t.Helper()
+	u, err := h.users.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("lookup %s: %v", username, err)
+	}
+	return u
+}
+
+func TestOverwriteNeedsAskingOnBothRoutes(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	// An upload onto an existing file conflicts until the client says
+	// otherwise.
+	resp := h.putBody(client, "/api/fs/upload?path=/docs&name=notes.txt", "text/plain", "REPLACEMENT")
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("upload onto an existing file = %d, want 409", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = h.putBody(client, "/api/fs/upload?path=/docs&name=notes.txt&overwrite=1", "text/plain", "REPLACEMENT")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("upload with declared overwrite = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+	// The replacement is what a reader gets back.
+	resp = h.get(client, "/api/fs/download?path=/docs/notes.txt")
+	landed, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(landed) != "REPLACEMENT" {
+		t.Errorf("after overwrite the file holds %q (status %d)", landed, resp.StatusCode)
+	}
+
+	// Renaming onto a name already held asks the same question.
+	resp = h.post(client, "/api/fs/rename", `{"from":"/docs/notes.txt","to_dir":"/photos","new_name":"b.png"}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("rename onto an existing file = %d, want 409", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if _, serr := os.Stat(filepath.Join(h.root, "docs", "notes.txt")); serr != nil {
+		t.Errorf("the refused rename disturbed its source: %v", serr)
+	}
+	resp = h.post(client, "/api/fs/rename", `{"from":"/docs/notes.txt","to_dir":"/photos","new_name":"b.png","overwrite":true}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("rename with declared overwrite = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if _, serr := os.Stat(filepath.Join(h.root, "docs", "notes.txt")); !os.IsNotExist(serr) {
+		t.Errorf("the source stayed put after a declared overwrite: %v", serr)
+	}
+	if _, serr := os.Stat(filepath.Join(h.root, "photos", "b.png")); serr != nil {
+		t.Errorf("the destination lost its file after the replace: %v", serr)
+	}
+
+	// A directory destination is never devoured, even on an explicit
+	// overwrite: one move replacing a subtree is deletion by mistake.
+	resp = h.post(client, "/api/fs/rename", `{"from":"/docs","to_dir":"/","new_name":"photos","overwrite":true}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("overwrite onto a directory = %d, want 409", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if _, serr := os.Stat(filepath.Join(h.root, "docs")); serr != nil {
+		t.Errorf("the refused dir rename disturbed its source: %v", serr)
+	}
+}
+
+func TestInlineIsAnAllowlistOnly(t *testing.T) {
+	h := newHarness(t)
+	write(t, h.root, "docs/sheet.svg", `<svg xmlns="http://www.w3.org/2000/svg"/>`)
+	write(t, h.root, "docs/page.html", `<html><script>1</script></html>`)
+	client := h.login("admin", "password123")
+
+	disposition := func(qpath string) (string, string) {
+		t.Helper()
+		resp := h.get(client, qpath)
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s = %d", qpath, resp.StatusCode)
+		}
+		return resp.Header.Get("Content-Disposition"), resp.Header.Get("Content-Type")
+	}
+
+	// Raster and pdf render in place, and are the whole list.
+	got, _ := disposition("/api/fs/download?path=/photos%2F2024%2Fa.jpg&inline=1")
+	if !strings.HasPrefix(got, "inline;") {
+		t.Errorf("jpeg with inline=1 asked for %q", got)
+	}
+	// SVG is scriptable text and lands as a download whatever was asked.
+	got, ct := disposition("/api/fs/download?path=/docs%2Fsheet.svg&inline=1")
+	if !strings.HasPrefix(got, "attachment;") {
+		t.Errorf("svg with inline=1 asked for %q", got)
+	}
+	if ct != "image/svg+xml" {
+		t.Errorf("svg content type = %q", ct)
+	}
+	// HTML does the same.
+	got, _ = disposition("/api/fs/download?path=/docs%2Fpage.html&inline=1")
+	if !strings.HasPrefix(got, "attachment;") {
+		t.Errorf("html with inline=1 asked for %q", got)
+	}
+	// And the default posture stays attachment for everything, as before.
+	got, _ = disposition("/api/fs/download?path=/photos%2F2024%2Fa.jpg")
+	if !strings.HasPrefix(got, "attachment;") {
+		t.Errorf("explicit download = %q", got)
+	}
+}
+
+func TestHealthAnswersPerDataDirectoryReality(t *testing.T) {
+	// The Docker HEALTHCHECK asks the honest question, so the endpoint
+	// must refuse to answer 200 when the process cannot perform.
+	data := t.TempDir()
+	h := newHarnessWithConfig(t, Config{SessionTTL: time.Hour, DataDir: data})
+
+	gauge := func(hh *harness) int {
+		t.Helper()
+		resp := hh.get(http.DefaultClient, "/healthz")
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// A live, writable directory is healthy, and probing it leaves
+	// nothing behind and does not wear out its welcome.
+	if got := gauge(h); got != http.StatusOK {
+		t.Errorf("healthz with a live data dir = %d, want 200", got)
+	}
+	again := newHarnessWithConfig(t, Config{SessionTTL: time.Hour, DataDir: data})
+	if got := gauge(again); got != http.StatusOK {
+		t.Errorf("healthz still healthy after the first probe = %d, want 200", got)
+	}
+
+	// A dislodged data directory is not healthy: stat answers nothing.
+	away := newHarnessWithConfig(t, Config{SessionTTL: time.Hour, DataDir: filepath.Join(data, "no-such-place")})
+	if got := gauge(away); got != http.StatusServiceUnavailable {
+		t.Errorf("healthz with a missing data dir = %d, want 503", got)
+	}
+
+	// A plain file posing as the data directory: the create probe fails
+	// under any operating system, because the "directory" is not one.
+	stale := t.TempDir()
+	cork := filepath.Join(stale, "users.json")
+	if err := os.WriteFile(cork, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	corked := newHarnessWithConfig(t, Config{SessionTTL: time.Hour, DataDir: cork})
+	if got := gauge(corked); got != http.StatusServiceUnavailable {
+		t.Errorf("healthz with a file as data dir = %d, want 503", got)
+	}
+}

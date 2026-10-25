@@ -684,3 +684,45 @@ func TestSessionsSaveFailureRollsBack(t *testing.T) {
 		t.Fatalf("End on a healthy table: %v", err)
 	}
 }
+
+func TestSyncReplaceMovesData(t *testing.T) {
+	dir := t.TempDir()
+	tmp := filepath.Join(dir, "note.tmp")
+	target := filepath.Join(dir, "note")
+
+	// A syncReplace without a written temp file cannot succeed.
+	if err := os.WriteFile(tmp, []byte("durable payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncReplace(tmp, target); err != nil {
+		t.Fatalf("syncReplace: %v", err)
+	}
+	raw, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(raw) != "durable payload" {
+		t.Errorf("target holds %q", raw)
+	}
+	// The temp name must not survive: leaving it behind would invite a
+	// later save to read stale bytes through WriteFile-free paths.
+	if _, err := os.Lstat(tmp); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the temp file survived the rename: %v", err)
+	}
+
+	// Replacing an existing target stays atomic-or-newer: the rename lands
+	// over the old name without error.
+	if err := os.WriteFile(tmp, []byte("second"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncReplace(tmp, target); err != nil {
+		t.Fatalf("second syncReplace: %v", err)
+	}
+	raw, err = os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "second" {
+		t.Errorf("second target holds %q", raw)
+	}
+}

@@ -229,7 +229,7 @@ func (s *Store) save() error {
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		return fmt.Errorf("auth: write %s: %w", tmp, err)
 	}
-	if err := os.Rename(tmp, s.path); err != nil {
+	if err := syncReplace(tmp, s.path); err != nil {
 		return fmt.Errorf("auth: replace %s: %w", s.path, err)
 	}
 	return nil

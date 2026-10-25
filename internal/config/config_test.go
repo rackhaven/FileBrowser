@@ -111,3 +111,52 @@ func TestTrashTTLDefaultsAndOverrides(t *testing.T) {
 		t.Errorf("TrashTTL env over file = %v, want 1h", cfg.TrashTTL)
 	}
 }
+
+func TestLogLevelDefaultsAndOverrides(t *testing.T) {
+	// Default: info level, a plain empty string.
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LogLevel != "" {
+		t.Errorf("LogLevel default = %q, want empty", cfg.LogLevel)
+	}
+
+	// A name from the list is accepted as handed (mixed case is fine).
+	t.Setenv("FB_LOG_LEVEL", "Warn")
+	cfg, err = Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LogLevel != "Warn" {
+		t.Errorf("LogLevel from env = %q, want Warn", cfg.LogLevel)
+	}
+
+	// Anything else fails loudly rather than logging as nothing at all.
+	t.Setenv("FB_LOG_LEVEL", "verbose")
+	if _, err := Load(""); err == nil {
+		t.Error("an unknown log level must be an error")
+	}
+
+	// The YAML sets it too, and the environment still wins.
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("log_level: error\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FB_LOG_LEVEL", "")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LogLevel != "error" {
+		t.Errorf("LogLevel from file = %q, want error", cfg.LogLevel)
+	}
+	t.Setenv("FB_LOG_LEVEL", "debug")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LogLevel != "debug" {
+		t.Errorf("LogLevel env over file = %q, want debug", cfg.LogLevel)
+	}
+}

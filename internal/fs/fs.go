@@ -26,6 +26,7 @@ package fs
 import (
 	"errors"
 	"fmt"
+	iofs "io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -459,4 +460,58 @@ func resolveExisting(p string) (string, error) {
 		tail = append(tail, filepath.Base(current))
 		current = parent
 	}
+}
+
+// SweepUploadTemps erases abandoned upload and copy temporaries. Names
+// with the .upload- prefix appear mid-routine in the destination folder
+// and are renamed or removed by their creator when it finishes; the
+// only temporaries of that shape left behind are the ones a crashed
+// request never got to clean up. They are hidden from listings but not
+// from the disk, so a crash per upload would gather them fast. One
+// older than maxAge belongs to no live stream: the sweep keeps whatever
+// a running upload could still be writing and lets the rest go.
+func (f *FS) SweepUploadTemps(maxAge time.Duration) (int, error) {
+	if maxAge <= 0 {
+		return 0, nil
+	}
+	if f.realRoot == "" {
+		return 0, nil
+	}
+
+	// Collect first, remove after: WalkDir does not enjoy a directory
+	// disappearing between reading the parent and reading the child, and
+	// the pass runs often enough to not care about the second walk.
+	cutoff := time.Now().UTC().Add(-maxAge)
+	removed := 0
+	var condemned []string
+	werr := filepath.WalkDir(f.realRoot, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			if p != f.realRoot {
+				return iofs.SkipDir // unreadable corner: leave it for tomorrow
+			}
+			return err
+		}
+		if !isUploadTempName(d.Name()) {
+			return nil
+		}
+		info, ierr := d.Info()
+		if ierr != nil || info.ModTime().UTC().After(cutoff) {
+			return nil // vanished mid-walk, or young enough to keep
+		}
+		condemned = append(condemned, p)
+		if d.IsDir() {
+			return iofs.SkipDir
+		}
+		return nil
+	})
+	if werr != nil {
+		return removed, werr
+	}
+	for _, p := range condemned {
+		if err := os.RemoveAll(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
 }

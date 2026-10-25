@@ -40,6 +40,27 @@ jobs:
       - name: Check the PWA assets agree with each other
         run: node tools/check-wiring.mjs
 
+  # A short fuzz run on two of the riskiest pure functions: the joiner that
+  # builds every path and the resolver behind the containment checks. The
+  # corpus from CI lands in the build cache, so each push explores a little
+  # further than the last; a real fuzzing campaign still belongs on a
+  # workstation, this only proves the suite runs and seeds keep passing.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Fuzz the path joiner
+        run: go test ./internal/fs -run '^$' -fuzz '^FuzzJoin$' -fuzztime 30s
+
+      - name: Fuzz the path resolver
+        run: go test ./internal/fs -run '^$' -fuzz '^FuzzResolve$' -fuzztime 30s
+
   build:
     runs-on: ubuntu-latest
     steps:
@@ -93,16 +114,11 @@ jobs:
             if curl -fsS http://127.0.0.1:8080/healthz >/dev/null; then break; fi
             sleep 1
           done
-          curl -fsS http://127.0.0.1:8080/healthz
-          curl -fsS http://127.0.0.1:8080/api/status
 
-          # The shell must be served so the sign-in form can render.
-          curl -fsS http://127.0.0.1:8080/ | grep -q '<title>'
-
-          # Unauthenticated API access must be refused.
-          code=$(curl -s -o /dev/null -w '%{http_code}' \
-            'http://127.0.0.1:8080/api/fs/list?path=/')
-          test "$code" = "401"
+          # One script now serves as the deploy smoke test and this, so a new
+          # check has to pass here before it reaches an operator; the two had
+          # been drifting, with inline checks here and deeper ones there.
+          FB_ADMIN_PASSWORD=ci-test-password ./deploy/smoke-test.sh http://127.0.0.1:8080
 
           docker logs fb
           docker rm -f fb

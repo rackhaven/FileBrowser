@@ -71,6 +71,10 @@ async function req(method, url, body) {
   const data = isJSON ? await res.json().catch(() => null) : null;
 
   if (!res.ok) {
+    // The server refuses everything but password housekeeping while a
+    // change is pending; show that screen immediately rather than a
+    // pile of toasts for background calls that all fail the same way.
+    if (data && data.must_change_password) showPasswordChange();
     throw new ApiError(res.status, (data && data.error) || `Request failed (${res.status})`);
   }
   return data;
@@ -178,7 +182,11 @@ function iconFor(entry) {
   return 'file';
 }
 
-const INLINE_OK = /^.(png|jpe?g|gif|webp|avif|bmp|svg|pdf|mp4|webm)$/i;
+// What the browser may render inline, matching the server's allowlist in
+// canInline: raster images and PDF. SVG would be handy but is text with
+// running script inside; the server ignores inline for anything outside
+// this list, so the two layers always agree.
+const INLINE_OK = /^\.(png|jpe?g|gif|webp|avif|bmp|pdf)$/i;
 
 function svgFor(key) {
   const wrap = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -200,7 +208,13 @@ function toast(message, kind = '') {
 
 // --------------------------------------------------------------- panels ---
 
+let panelOpener = null;
+
 function openPanel(node) {
+  // Remember where focus came from: Escape and the close buttons hand it
+  // back when their panel dies, so a keyboard user never lands in the
+  // page body with no idea where they are.
+  panelOpener = document.activeElement;
   el.menu.hidden = true;
   el.admin.hidden = true;
   el.searchpane.hidden = true;
@@ -208,15 +222,23 @@ function openPanel(node) {
   el.sessionspane.hidden = true;
   node.hidden = false;
   el.scrim.hidden = false;
+  // The menu button is the only opener that toggles a state a screen
+  // reader can announce; the rest are drawers, not toggles.
+  $('btn-menu').setAttribute('aria-expanded', String(node === el.menu));
 }
 
 function closePanels() {
-  el.menu.hidden = true;
-  el.admin.hidden = true;
-  el.searchpane.hidden = true;
-  el.trashpane.hidden = true;
-  el.sessionspane.hidden = true;
+  let wasOpen = false;
+  for (const node of [el.menu, el.admin, el.searchpane, el.trashpane, el.sessionspane]) {
+    if (!node.hidden) wasOpen = true;
+    node.hidden = true;
+  }
   el.scrim.hidden = true;
+  $('btn-menu').setAttribute('aria-expanded', 'false');
+  if (wasOpen && panelOpener && panelOpener.isConnected) {
+    panelOpener.focus();
+  }
+  panelOpener = null;
 }
 
 // ---------------------------------------------------------------- sheet ---
@@ -394,7 +416,13 @@ function renderList() {
  * grows in place so the browser keeps the user's scroll position instead of
  * jumping to the top of a reloaded folder.
  */
+let loadMoreBusy = false;
 async function loadMore() {
+  // Two clicks before the first answer comes back would append the same
+  // page twice: the guard makes the row and its button calm down until
+  // the page in flight lands.
+  if (loadMoreBusy || !state.more) return;
+  loadMoreBusy = true;
   try {
     const data = await API.list(state.path, { offset: state.entries.length, limit: LIST_PAGE });
     state.entries = state.entries.concat(data.entries || []);
@@ -404,6 +432,8 @@ async function loadMore() {
   } catch (err) {
     if (err.status === 401) return showLogin();
     toast(err.message, 'err');
+  } finally {
+    loadMoreBusy = false;
   }
 }
 
@@ -424,12 +454,26 @@ function isPreviewable(name) {
   return /\.(jpe?g|png|gif)$/i.test(name || '');
 }
 
+let quotaBusy = false;
+const quotaSeen = new Map();
+const QUOTA_MIN_GAP = 15000;
 async function refreshQuota() {
+  // The usage call walks the whole visible tree, so it is the heaviest
+  // read the UI peppers the server with: one per folder click more or
+  // less. Only one walk may run at any time, identical-for-path repeats
+  // inside the gap window are skipped, and a walk that lands after the
+  // user left the folder does not repaint someone else's numbers.
+  const path = state.path;
+  if (quotaBusy || Date.now() - (quotaSeen.get(path) || 0) < QUOTA_MIN_GAP) return;
+  quotaBusy = true;
   try {
-    const u = await API.usage(state.path);
-    el.quota.textContent = `${formatBytes(u.bytes)} · ${u.files} files`;
+    const u = await API.usage(path);
+    if (state.path === path) el.quota.textContent = `${formatBytes(u.bytes)} · ${u.files} files`;
+    quotaSeen.set(path, Date.now());
   } catch {
-    el.quota.textContent = '';
+    if (state.path === path) el.quota.textContent = '';
+  } finally {
+    quotaBusy = false;
   }
 }
 
@@ -543,7 +587,9 @@ async function renderTrash() {
   try {
     const data = await API.trash();
     const entries = data.entries || [];
-    $('trash-empty').hidden = entries.length === 0;
+    // The wipe is admin-only server-side, so the button should not tease
+    // a permission error at everyone else.
+    $('trash-empty').hidden = !(state.user && state.user.admin) || entries.length === 0;
 
     if (entries.length === 0) {
       box.replaceChildren(trashNote('Nothing deleted. Deleting sends items here, not off the disk.'));
@@ -596,7 +642,8 @@ function trashRow(entry) {
   shred.className = 'trash-erase';
   shred.textContent = 'Erase';
   shred.addEventListener('click', async () => {
-    if (!confirm(`Erase ${entry.original_path || entry.name} for good?`)) return;
+    if (!await confirmSheet(`Erase ${entry.original_path || entry.name} for good?`,
+      'This is not the trash: the bytes leave the disk.', 'Erase')) return;
     try {
       await API.trashDelete(entry.name);
       renderTrash();
@@ -669,7 +716,8 @@ function sessRow(sess) {
   end.disabled = !!sess.current;
   end.hidden = !!sess.current;
   end.addEventListener('click', async () => {
-    if (!confirm('Sign that device out now?')) return;
+    if (!await confirmSheet('Sign that device out now?',
+      'It will have to sign in again.', 'Sign out')) return;
     try {
       await API.endSession(sess.id);
       renderSessions();
@@ -732,19 +780,26 @@ function openDetail(entry) {
   $('d-rename').hidden = !canModify;
   $('d-delete').hidden = !canModify;
 
-  $('d-download').onclick = () => { el.detail.hidden = true; doDownload(entry); };
+  // The sheet vanishes under Escape like every other layer, so the row
+  // that opened it keeps the user's place.
+  panelOpener = document.activeElement;
+  $('d-download').onclick = () => { closeDetail(); doDownload(entry); };
   $('d-copy').hidden = !canModify;
-  $('d-copy').onclick = () => { el.detail.hidden = true; doCopy(entry); };
-  $('d-rename').onclick = () => { el.detail.hidden = true; doRename(entry); };
-  $('d-delete').onclick = () => { el.detail.hidden = true; doDelete(entry); };
-  $('d-cancel').onclick = () => {
-    el.detail.hidden = true;
-    // Reset selection so the next tap downloads again instead of reopening.
-    state.selected = null;
-    for (const prev of el.list.querySelectorAll('.sel')) prev.classList.remove('sel');
-  };
+  $('d-copy').onclick = () => { closeDetail(); doCopy(entry); };
+  $('d-rename').onclick = () => { closeDetail(); doRename(entry); };
+  $('d-delete').onclick = () => { closeDetail(); doDelete(entry); };
+  $('d-cancel').onclick = closeDetail;
 
   el.detail.hidden = false;
+}
+
+function closeDetail() {
+  el.detail.hidden = true;
+  // Reset selection so the next tap downloads again instead of reopening.
+  state.selected = null;
+  for (const prev of el.list.querySelectorAll('.sel')) prev.classList.remove('sel');
+  if (panelOpener && panelOpener.isConnected) panelOpener.focus();
+  panelOpener = null;
 }
 
 async function doDownload(entry) {
@@ -798,13 +853,27 @@ async function doRename(entry) {
   if (!name || name === entry.name) return;
   if (name.includes('/')) return toast('A name cannot contain a slash.', 'err');
 
+  const body = { from: entry.path, to_dir: state.path, new_name: name };
   try {
-    await API.rename({ from: entry.path, to_dir: state.path, new_name: name });
-    toast('Renamed');
-    navigate(state.path, { push: false });
+    await API.rename(body);
   } catch (err) {
-    toast(err.message, 'err');
+    // A name clash is recoverable only with the owner's say-so, so the
+    // conflict becomes one question instead of a dead end.
+    if (!(err instanceof ApiError && err.status === 409)) {
+      toast(err.message, 'err');
+      return;
+    }
+    if (!await confirmSheet(`Replace “${name}”?`, 'A file with that name already exists here.', 'Replace')) return;
+    body.overwrite = true;
+    try {
+      await API.rename(body);
+    } catch (err2) {
+      toast(err2.message, 'err');
+      return;
+    }
   }
+  toast('Renamed');
+  navigate(state.path, { push: false });
 }
 
 async function doDelete(entry) {
@@ -832,9 +901,22 @@ function pickFile(dir, accept) {
     input.type = 'file';
     input.multiple = true;
     if (accept) input.accept = accept;
-    input.addEventListener('change', () => resolve(Array.from(input.files || [])), { once: true });
-    // A cancelled picker fires no event in most browsers; the promise simply
-    // never resolves, which is harmless because nothing awaits it later.
+    let done = false;
+    const finish = (files) => {
+      if (done) return;
+      done = true;
+      window.removeEventListener('focus', onRefocus);
+      resolve(files);
+    };
+    input.addEventListener('change', () => finish(Array.from(input.files || [])), { once: true });
+    // Browsers that announce a dismissed picker do so through cancel.
+    input.addEventListener('cancel', () => finish([]));
+    // The rest say nothing at all; the window regaining focus without a
+    // pick event is the only tell. The beat before resolving keeps this
+    // fallback from outrunning a change event that arrives a hair after
+    // the picker is dismissed with a selection in hand.
+    const onRefocus = () => setTimeout(() => finish([]), 400);
+    window.addEventListener('focus', onRefocus, { once: true });
     input.click();
   });
 }
@@ -846,10 +928,11 @@ function pickFile(dir, accept) {
  * API still cannot report. The body is the File itself, so the browser streams
  * it without ever materialising it in JS memory.
  */
-function uploadFile(file, dir) {
+function uploadFile(file, dir, overwrite = false) {
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest();
-    const url = `/api/fs/upload?path=${encodeURIComponent(dir)}&name=${encodeURIComponent(file.name)}`;
+    const url = `/api/fs/upload?path=${encodeURIComponent(dir)}&name=${encodeURIComponent(file.name)}` +
+      (overwrite ? '&overwrite=1' : '');
 
     const label = document.createElement('div');
     label.className = 'toast';
@@ -869,6 +952,10 @@ function uploadFile(file, dir) {
       label.remove();
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve(true);
+      } else if (xhr.status === 409 && !overwrite) {
+        // A name clash is the caller's call: give it back so doUpload can
+        // ask before replacing anything.
+        resolve('conflict');
       } else {
         let msg = `Upload failed (${xhr.status})`;
         try { msg = JSON.parse(xhr.responseText).error || msg; } catch { /* keep default */ }
@@ -899,7 +986,15 @@ async function doUpload() {
   let ok = 0;
   for (const file of files) {
     // Sequential, so progress toasts do not pile up and mobile radios stay sane.
-    if (await uploadFile(file, state.path)) ok++;
+    let done = await uploadFile(file, state.path);
+    if (done === 'conflict') {
+      // The outgoing files are never replaced without an owner's
+      // decision; one question per file says exactly what is at stake.
+      if (await confirmSheet(`Replace “${file.name}”?`, 'A file with that name already exists here.', 'Replace')) {
+        done = await uploadFile(file, state.path, true);
+      }
+    }
+    if (done === true) ok++;
   }
   if (ok) {
     toast(`Uploaded ${ok} file${ok === 1 ? '' : 's'}`);
@@ -927,10 +1022,14 @@ async function doMkdir() {
 
 // ---------------------------------------------------------------- search ---
 
+let searchTimer = null;
 function onSearchInput() {
   state.filter = $('search-input').value.trim().toLowerCase();
+  // The local filter above renders instantly; the whole-subtree server
+  // walk waits for typing to settle instead of firing once per key.
   renderList();
-  updateSearchResults();
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(updateSearchResults, 250);
 }
 
 /**
@@ -1297,6 +1396,16 @@ function wire() {
   $('admin-close').addEventListener('click', closePanels);
   $('search-close').addEventListener('click', closePanels);
 
+  // Escape peels back the topmost layer only: the sheet dialog governs
+  // itself, the detail sheet and the panels each close on their own
+  // Escape, and a page with nothing open notices none of it.
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (el.sheet.open) return;
+    if (!el.detail.hidden) { closeDetail(); return; }
+    closePanels();
+  });
+
   // Browser back/forward between folders. popstate fires for both
   // pushState-created entries and real history navigation.
   window.addEventListener('popstate', () => {
@@ -1318,7 +1427,8 @@ function wire() {
   });
   $('trash-close').addEventListener('click', closePanels);
   $('trash-empty').addEventListener('click', async () => {
-    if (!confirm('Erase every deleted item for everyone? This cannot be undone.')) return;
+    if (!await confirmSheet('Erase every deleted item for everyone?',
+      'This cannot be undone. Restore first if something might still be wanted.', 'Erase all')) return;
     try {
       await API.trashEmpty();
       renderTrash();

@@ -150,7 +150,7 @@ func runServe(args []string) error {
 		cfg.TrashTTL = d
 	}
 
-	logger := newLogger()
+	logger := newLogger(cfg.LogLevel)
 
 	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, "users.json"))
 	if err != nil {
@@ -177,6 +177,7 @@ func runServe(args []string) error {
 			SessionTTL:        cfg.SessionTTL,
 			MaxUploadBytes:    cfg.MaxUploadBytes,
 			ThumbCache:        cfg.ThumbCache,
+			DataDir:           cfg.DataDir,
 		},
 		Users:    store,
 		Sessions: sessions,
@@ -186,11 +187,11 @@ func runServe(args []string) error {
 		Logger:   logger,
 	})
 
-	// Deleted entries age out of the trash quietly: retention is a server
-	// policy, not something each user is asked about at delete time.
-	if cfg.TrashTTL > 0 {
-		go trashRetention(files, cfg.TrashTTL, logger)
-	}
+	// Deleted entries age out of the trash and preview cache, and upload
+	// temporaries left by crashed requests erode away on a fixed window:
+	// retention is a server policy, not something each user is asked
+	// about at delete time.
+	go housekeeping(files, cfg.TrashTTL, cfg.ThumbTTL, logger)
 
 	httpServer := &http.Server{
 		Addr:    cfg.Listen,
@@ -248,18 +249,21 @@ func runServe(args []string) error {
 	return <-errCh
 }
 
-// newLogger builds a human-readable logger, honouring FB_LOG_LEVEL.
-func newLogger() *slog.Logger {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("FB_LOG_LEVEL")) {
+// newLogger builds a human-readable logger. The level comes from the config
+// (log_level, with FB_LOG_LEVEL overriding), not from the environment here:
+// one source of truth for what the process will log, validated where the
+// rest of the config is validated.
+func newLogger(level string) *slog.Logger {
+	lvl := slog.LevelInfo
+	switch strings.ToLower(level) {
 	case "debug":
-		level = slog.LevelDebug
+		lvl = slog.LevelDebug
 	case "warn":
-		level = slog.LevelWarn
+		lvl = slog.LevelWarn
 	case "error":
-		level = slog.LevelError
+		lvl = slog.LevelError
 	}
-	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
 }
 
 // bootstrapAdmin makes sure at least one administrator exists.
@@ -312,18 +316,38 @@ func bootstrapAdmin(store *auth.Store, dataDir string, logger *slog.Logger) erro
 	return nil
 }
 
-// trashRetention runs the trash window in the background: a sweep at
-// start-up, then once a day. The retention clock is days, so daily runs
-// keep every entry within a day of its window; pacing it any tighter
-// only burns cycles on directory reads.
-func trashRetention(files *fs.FS, ttl time.Duration, log *slog.Logger) {
+// housekeeping runs the retention windows in the background: a sweep at
+// start-up, then once a day. The retention clocks are days, so daily
+// runs keep every entry within a day of its window; pacing any tighter
+// only burns cycles on directory reads. Abandoned upload temporaries
+// ride along on a fixed window: their owners either finish or crash
+// within minutes, so anything a day old is beyond every doubt.
+func housekeeping(files *fs.FS, trashTTL, thumbTTL time.Duration, log *slog.Logger) {
 	for i := 0; ; i++ {
 		// Read-and-remove races with restore and wipe by idempotent
 		// steps on both sides, so no locking is worth the complexity.
-		if n, err := files.TrashSweep(ttl); err != nil {
-			log.Error("trash retention", "err", err)
+		if trashTTL > 0 {
+			if n, err := files.TrashSweep(trashTTL); err != nil {
+				log.Error("trash retention", "err", err)
+			} else if n > 0 {
+				log.Info("trash retention", "erased", n)
+			}
+		}
+		// The preview cache is the quietest disk leak there is: one file
+		// per (path, size, mtime) combo, none of them ever renamed over.
+		if thumbTTL > 0 {
+			if n, err := files.ThumbSweep(thumbTTL); err != nil {
+				log.Error("thumbnail retention", "err", err)
+			} else if n > 0 {
+				log.Info("thumbnail retention", "erased", n)
+			}
+		}
+		// Every maker of a .upload- temp renames or removes it on the way
+		// out; the ones still on disk are the way-outs that never came.
+		if n, err := files.SweepUploadTemps(24 * time.Hour); err != nil {
+			log.Error("upload temp retention", "err", err)
 		} else if n > 0 {
-			log.Info("trash retention", "erased", n)
+			log.Info("upload temp retention", "erased", n)
 		}
 		time.Sleep(24 * time.Hour)
 	}

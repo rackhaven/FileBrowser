@@ -58,6 +58,14 @@ type Config struct {
 	// ThumbCache is where generated image previews live. Empty falls back
 	// to a folder inside DataDir; set FB_THUMB_CACHE to relocate it.
 	ThumbCache string `yaml:"thumb_cache"`
+	// ThumbTTL is how long a generated preview stays in the cache before
+	// it is deleted: the cache is derived data and must not become the
+	// biggest growth in the tree. Zero keeps previews until hands clean.
+	ThumbTTL time.Duration `yaml:"thumb_ttl"`
+	// LogLevel is the slog minimum: debug, info, warn or error. Empty
+	// means info. Operational, not correctness-relevant, but a typo should
+	// still be a config error rather than silence.
+	LogLevel string `yaml:"log_level"`
 	// AllowSignup is intentionally not supported: accounts are created by an
 	// admin so the service can never be self-serve on a public network.
 }
@@ -75,6 +83,9 @@ func Default() Config {
 		// 32 GiB. Generous, but a cap: a hostile client must not be able to
 		// fill the disk through uploads alone.
 		MaxUploadBytes: 32 << 30,
+		// Seven days: a preview is cheap to regenerate, so old ones earn
+		// nothing after a week of nobody viewing that image version.
+		ThumbTTL: 7 * 24 * time.Hour,
 	}
 }
 
@@ -121,6 +132,29 @@ func Load(path string) (Config, error) {
 		}
 	}
 
+	if v, ok := os.LookupEnv("FB_THUMB_TTL"); ok {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return cfg, fmt.Errorf("FB_THUMB_TTL: %w", err)
+			}
+			cfg.ThumbTTL = d
+		}
+	}
+
+	if v, ok := os.LookupEnv("FB_LOG_LEVEL"); ok {
+		if level := strings.TrimSpace(v); level != "" {
+			cfg.LogLevel = level
+		}
+	}
+
+	switch strings.ToLower(cfg.LogLevel) {
+	case "", "debug", "info", "warn", "error":
+	default:
+		return cfg, fmt.Errorf("log_level must be debug, info, warn or error, not %q", cfg.LogLevel)
+	}
+
 	if cfg.Listen == "" {
 		return cfg, fmt.Errorf("listen address must not be empty")
 	}
@@ -138,6 +172,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.TrashTTL < 0 {
 		return cfg, fmt.Errorf("trash_ttl must not be negative: use zero to keep deleted entries until erased by hand")
+	}
+	if cfg.ThumbTTL < 0 {
+		return cfg, fmt.Errorf("thumb_ttl must not be negative: use zero to keep previews until erased by hand")
 	}
 
 	cfg.Root = filepath.Clean(cfg.Root)

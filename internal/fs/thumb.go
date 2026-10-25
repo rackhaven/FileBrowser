@@ -226,3 +226,40 @@ func (f *FS) decodeFile(rel string) (image.Image, error) {
 func addNotImage(err error) error {
 	return fmt.Errorf("%w (%v)", ErrNotImage, err)
 }
+
+// ThumbSweep carries out cache retention: generated previews older than
+// maxAge are deleted so the cache cannot grow without end. Only files in
+// the configured cache directory are touched, and the sweep treats the
+// cache for what it is: derived data, always safe to delete.
+func (f *FS) ThumbSweep(maxAge time.Duration) (int, error) {
+	if maxAge <= 0 {
+		return 0, nil
+	}
+	if f.thumbCache == "" {
+		return 0, nil
+	}
+	des, err := os.ReadDir(f.thumbCache)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	cutoff := time.Now().UTC().Add(-maxAge)
+	removed := 0
+	for _, de := range des {
+		info, ierr := de.Info()
+		if ierr != nil {
+			continue // vanished mid-sweep: nothing to do about it
+		}
+		if !info.ModTime().UTC().Before(cutoff) {
+			continue // young enough to keep
+		}
+		if err := os.Remove(filepath.Join(f.thumbCache, de.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
+}

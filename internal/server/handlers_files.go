@@ -173,7 +173,10 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", detectContentType(info.Name()))
-	w.Header().Set("Content-Disposition", contentDisposition(entry.Name, r.URL.Query().Get("inline") == "1"))
+	// The allowlist is the server's decision to make: a query parameter
+	// alone does not turn an arbitrary uploaded file into origin-rendered
+	// content for someone else's browser.
+	w.Header().Set("Content-Disposition", contentDisposition(entry.Name, r.URL.Query().Get("inline") == "1" && canInline(entry.Name)))
 	w.Header().Set("Accept-Ranges", "bytes")
 	// Private: a shared proxy must not cache someone's files.
 	w.Header().Set("Cache-Control", "private, max-age=0, must-revalidate")
@@ -187,6 +190,22 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	s.logf("download", "user", u.Username, "file", entry.Name, "bytes", info.Size())
 	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
+}
+
+// canInline answers whether the browser may render this file in place of a
+// downloaded one. The list is an allowlist of formats a browser displays
+// without giving the page's script a server-origin foothold, because a
+// download link is something a user clicks with their session cookie in
+// their pocket: an uploaded HTML file or SVG served inline every time
+// someone else clicks a shared link is stored page scripting by any other
+// name, on another user's browser. Video, text and everything else gets the
+// default download behaviour, no matter what the loading UI hoped for.
+func canInline(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp", ".pdf":
+		return true
+	}
+	return false
 }
 
 // contentDisposition builds the header. The filename is passed both as ASCII
@@ -248,7 +267,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	name := q.Get("name")
 
-	target, vpath, err := s.files.UploadTarget(u, q.Get("path"), name)
+	target, vpath, err := s.files.UploadTarget(u, q.Get("path"), name, q.Get("overwrite") != "")
 	if err != nil {
 		s.writeFSError(w, r, err)
 		return
@@ -352,6 +371,10 @@ type renameRequest struct {
 	From    string `json:"from"`
 	ToDir   string `json:"to_dir"`
 	NewName string `json:"new_name"`
+	// Overwrite lets the caller replace an existing file at the
+	// destination after it has confirmed with a human. Without it a name
+	// collision answers 409 Conflict.
+	Overwrite bool `json:"overwrite"`
 }
 
 // handleRename moves or renames an entry.
@@ -362,7 +385,7 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	entry, err := s.files.Rename(u, req.From, req.ToDir, strings.TrimSpace(req.NewName))
+	entry, err := s.files.Rename(u, req.From, req.ToDir, strings.TrimSpace(req.NewName), req.Overwrite)
 	if err != nil {
 		s.writeFSError(w, r, err)
 		return
@@ -377,6 +400,10 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	if depth <= 0 || depth > 16 {
 		depth = 8
 	}
+	// Counting is a walk of everything visible, so it takes a work slot
+	// like its siblings.
+	release := s.workSlot()
+	defer release()
 	usage, err := s.files.Usage(u, r.URL.Query().Get("path"), depth)
 	if err != nil {
 		s.writeFSError(w, r, err)
@@ -392,6 +419,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
 	q := r.URL.Query()
 
+	// A recursive search races whole subtrees; the work gate keeps a
+	// spirited typist from stacking an unbounded number of walks.
+	release := s.workSlot()
+	defer release()
 	found, err := s.files.Search(u, q.Get("path"), q.Get("q"))
 	if err != nil {
 		s.writeFSError(w, r, err)
@@ -414,6 +445,12 @@ func (s *Server) handleThumb(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
 	vpath := r.URL.Query().Get("path")
 
+	// Decoding is the most expensive read on the server: a huge image
+	// costs hundreds of megabytes of RAM per concurrent request, so the
+	// work gate bounds how many run at once. Cache hits pay the wait too,
+	// which is the honest bonus of a bounded queue: nobody skips it.
+	release := s.workSlot()
+	defer release()
 	thumb, err := s.files.Thumbnail(u, vpath)
 	if err != nil {
 		s.writeFSError(w, r, err)
@@ -445,6 +482,10 @@ func (s *Server) handleZip(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
 	vpath := r.URL.Query().Get("path")
 
+	// Archive walking is whole-tree work, so it shares the bounded work
+	// gate before any bytes move.
+	release := s.workSlot()
+	defer release()
 	name, err := s.files.ZipInfo(u, vpath)
 	if err != nil {
 		s.writeFSError(w, r, err)
@@ -466,8 +507,50 @@ func (s *Server) handleZip(w http.ResponseWriter, r *http.Request) {
 	s.logf("zip", "user", u.Username, "path", fs.Clean(vpath))
 }
 
-// handleHealth is for uptime checks and the Docker HEALTHCHECK.
+// handleHealth is for uptime checks and the Docker HEALTHCHECK. It answers
+// 200 only when serving can actually continue: the data directory exists and
+// accepts a small write, so a full disk or a dislodged volume reports itself
+// instead of keeping a container nominally healthy while every write fails.
+// With no DataDir configured the check degrades to liveness, which is what
+// tests and embedded use want from it anyway.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.DataDir == "" {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, "ok")
+		return
+	}
+
+	info, err := os.Stat(s.cfg.DataDir)
+	if err != nil || !info.IsDir() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintln(w, "data directory unreachable")
+		return
+	}
+
+	// A create is the only honest probe of a possibly-full disk: space the
+	// process can see is not space it can use if a quota or permission
+	// gets in the way between here and the platter.
+	tmp, err := os.CreateTemp(s.cfg.DataDir, ".health-*")
+	if err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintln(w, "data directory is not writable")
+		return
+	}
+	named := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintln(w, "data directory is not writable")
+		_ = os.Remove(named)
+		return
+	}
+	if err := os.Remove(named); err != nil {
+		// The probe file could not be dropped, which is itself a health
+		// signal, but the write did land; report well and keep sweeping.
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintln(w, "data directory is not writable")
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintln(w, "ok")
 }
@@ -554,6 +637,10 @@ func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request) {
 		req.ToDir = path.Dir(fs.Clean(req.From))
 	}
 
+	// Duplicating a folder is whole-tree streaming work; it queues behind
+	// the other heavy handlers.
+	release := s.workSlot()
+	defer release()
 	entry, err := s.files.Copy(u, req.From, req.ToDir, req.Name)
 	if err != nil {
 		s.writeFSError(w, r, err)

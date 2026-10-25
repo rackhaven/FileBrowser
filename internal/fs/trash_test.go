@@ -217,7 +217,7 @@ func TestReservedTrashNameCannotBeUsed(t *testing.T) {
 	if _, err := f.Mkdir(u, "/", ".trash"); err != ErrReserved {
 		t.Errorf("Mkdir .trash: %v, want ErrReserved", err)
 	}
-	if _, err := f.Rename(u, "/docs", "/", ".trash"); err != ErrReserved {
+	if _, err := f.Rename(u, "/docs", "/", ".trash", false); err != ErrReserved {
 		t.Errorf("Rename to .trash: %v, want ErrReserved", err)
 	}
 	if err := f.Remove(u, "/.trash"); err != ErrReserved {

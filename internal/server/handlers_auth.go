@@ -187,9 +187,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// sessionHint was folded into the auth package: the hint travels with the
-// session so reloaded ones can be recognised too.
-
 type sessionView struct {
 	ID       string `json:"id"`
 	Created  string `json:"created_at"`
