@@ -186,10 +186,11 @@ func runServe(args []string) error {
 		Logger:   logger,
 	})
 
-	// Deleted entries age out of the trash quietly: retention is a server
-	// policy, not something each user is asked about at delete time.
-	if cfg.TrashTTL > 0 {
-		go trashRetention(files, cfg.TrashTTL, logger)
+	// Deleted entries age out of both trash and preview cache quietly:
+	// retention is a server policy, not something each user is asked
+	// about at delete time.
+	if cfg.TrashTTL > 0 || cfg.ThumbTTL > 0 {
+		go housekeeping(files, cfg.TrashTTL, cfg.ThumbTTL, logger)
 	}
 
 	httpServer := &http.Server{
@@ -312,18 +313,29 @@ func bootstrapAdmin(store *auth.Store, dataDir string, logger *slog.Logger) erro
 	return nil
 }
 
-// trashRetention runs the trash window in the background: a sweep at
-// start-up, then once a day. The retention clock is days, so daily runs
-// keep every entry within a day of its window; pacing it any tighter
+// housekeeping runs the retention windows in the background: a sweep at
+// start-up, then once a day. The retention clocks are days, so daily
+// runs keep every entry within a day of its window; pacing any tighter
 // only burns cycles on directory reads.
-func trashRetention(files *fs.FS, ttl time.Duration, log *slog.Logger) {
+func housekeeping(files *fs.FS, trashTTL, thumbTTL time.Duration, log *slog.Logger) {
 	for i := 0; ; i++ {
 		// Read-and-remove races with restore and wipe by idempotent
 		// steps on both sides, so no locking is worth the complexity.
-		if n, err := files.TrashSweep(ttl); err != nil {
-			log.Error("trash retention", "err", err)
-		} else if n > 0 {
-			log.Info("trash retention", "erased", n)
+		if trashTTL > 0 {
+			if n, err := files.TrashSweep(trashTTL); err != nil {
+				log.Error("trash retention", "err", err)
+			} else if n > 0 {
+				log.Info("trash retention", "erased", n)
+			}
+		}
+		// The preview cache is the quietest disk leak there is: one file
+		// per (path, size, mtime) combo, none of them ever renamed over.
+		if thumbTTL > 0 {
+			if n, err := files.ThumbSweep(thumbTTL); err != nil {
+				log.Error("thumbnail retention", "err", err)
+			} else if n > 0 {
+				log.Info("thumbnail retention", "erased", n)
+			}
 		}
 		time.Sleep(24 * time.Hour)
 	}

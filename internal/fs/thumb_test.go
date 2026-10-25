@@ -229,3 +229,62 @@ func TestThumbnailWorksWithoutCache(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 }
+
+func TestThumbSweepErasesStalePreviews(t *testing.T) {
+	f := newTestFS(t)
+	dir := mustRoot(f) + "-thumbs"
+	if err := f.SetThumbCache(dir); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(name string, age time.Duration) {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if age > 0 {
+			old := time.Now().Add(-age)
+			if err := os.Chtimes(p, old, old); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	mk("t-old.jpg", 8*24*time.Hour)
+	mk("t-mid.jpg", 3*24*time.Hour)
+	mk("t-fresh.jpg", 0)
+
+	// Files outside the window go; files inside stay. A missing cache
+	// directory is fine, and zero duration disables the sweep entirely.
+	n, err := f.ThumbSweep(7 * 24 * time.Hour)
+	if err != nil {
+		t.Fatalf("ThumbSweep: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("sweep removed %d, want 1", n)
+	}
+	if _, serr := os.Stat(filepath.Join(dir, "t-old.jpg")); !os.IsNotExist(serr) {
+		t.Errorf("the stale preview survived: %v", serr)
+	}
+	if _, serr := os.Stat(filepath.Join(dir, "t-mid.jpg")); serr != nil {
+		t.Errorf("the in-window preview did not survive: %v", serr)
+	}
+	if _, serr := os.Stat(filepath.Join(dir, "t-fresh.jpg")); serr != nil {
+		t.Errorf("the fresh preview did not survive: %v", serr)
+	}
+
+	if n, err := f.ThumbSweep(0); err != nil || n != 0 {
+		t.Fatalf("zero window must disable: n=%d err=%v", n, err)
+	}
+	if n, err := f.ThumbSweep(time.Hour); err != nil || n != 1 {
+		t.Fatalf("tight window removals: n=%d err=%v", n, err)
+	}
+	if _, serr := os.Stat(filepath.Join(dir, "t-fresh.jpg")); serr != nil {
+		t.Errorf("the still-fresh preview did not survive: %v", serr)
+	}
+}
+
+func TestThumbSweepWithoutCacheIsANoOp(t *testing.T) {
+	f := newTestFS(t)
+	if n, err := f.ThumbSweep(time.Hour); err != nil || n != 0 {
+		t.Fatalf("no cache sweep: n=%d err=%v", n, err)
+	}
+}

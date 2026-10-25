@@ -377,6 +377,10 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	if depth <= 0 || depth > 16 {
 		depth = 8
 	}
+	// Counting is a walk of everything visible, so it takes a work slot
+	// like its siblings.
+	release := s.workSlot()
+	defer release()
 	usage, err := s.files.Usage(u, r.URL.Query().Get("path"), depth)
 	if err != nil {
 		s.writeFSError(w, r, err)
@@ -392,6 +396,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
 	q := r.URL.Query()
 
+	// A recursive search races whole subtrees; the work gate keeps a
+	// spirited typist from stacking an unbounded number of walks.
+	release := s.workSlot()
+	defer release()
 	found, err := s.files.Search(u, q.Get("path"), q.Get("q"))
 	if err != nil {
 		s.writeFSError(w, r, err)
@@ -414,6 +422,12 @@ func (s *Server) handleThumb(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
 	vpath := r.URL.Query().Get("path")
 
+	// Decoding is the most expensive read on the server: a huge image
+	// costs hundreds of megabytes of RAM per concurrent request, so the
+	// work gate bounds how many run at once. Cache hits pay the wait too,
+	// which is the honest bonus of a bounded queue: nobody skips it.
+	release := s.workSlot()
+	defer release()
 	thumb, err := s.files.Thumbnail(u, vpath)
 	if err != nil {
 		s.writeFSError(w, r, err)
@@ -445,6 +459,10 @@ func (s *Server) handleZip(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
 	vpath := r.URL.Query().Get("path")
 
+	// Archive walking is whole-tree work, so it shares the bounded work
+	// gate before any bytes move.
+	release := s.workSlot()
+	defer release()
 	name, err := s.files.ZipInfo(u, vpath)
 	if err != nil {
 		s.writeFSError(w, r, err)
@@ -554,6 +572,10 @@ func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request) {
 		req.ToDir = path.Dir(fs.Clean(req.From))
 	}
 
+	// Duplicating a folder is whole-tree streaming work; it queues behind
+	// the other heavy handlers.
+	release := s.workSlot()
+	defer release()
 	entry, err := s.files.Copy(u, req.From, req.ToDir, req.Name)
 	if err != nil {
 		s.writeFSError(w, r, err)

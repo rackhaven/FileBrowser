@@ -71,6 +71,12 @@ type Server struct {
 	// login path, so the per-attempt memory cost of argon2id is capped no
 	// matter how many source addresses arrive at once.
 	loginGate chan struct{}
+	// workGate bounds concurrent heavy handler work: decodes of large
+	// images, whole-tree walks for zip, search, usage and copies. Without
+	// it, N authenticated requests in parallel cost N times the worst
+	// handler's peak memory, which is how a bored user takes a server to
+	// its knees without ever touching upload or login.
+	workGate  chan struct{}
 	started   time.Time
 	version   string
 	log       *slog.Logger
@@ -118,6 +124,7 @@ func New(opt Options) *Server {
 		static:    opt.Static,
 		limiter:   newRateLimiter(8, 15*time.Minute),
 		loginGate: make(chan struct{}, 4),
+		workGate:  make(chan struct{}, 4),
 		started:   time.Now(),
 		version:   opt.Version,
 		log:       logger,
@@ -131,6 +138,13 @@ func (s *Server) logf(msg string, args ...any) {
 
 func (s *Server) logError(msg string, args ...any) {
 	s.log.Error(msg, args...)
+}
+
+// workSlot takes one of the few heavy-work slots, blocking until a slot
+// frees. It returns the release function; handlers defer it.
+func (s *Server) workSlot() func() {
+	s.workGate <- struct{}{}
+	return func() { <-s.workGate }
 }
 
 // requireAuth wraps a handler so it only runs for a logged-in user.
