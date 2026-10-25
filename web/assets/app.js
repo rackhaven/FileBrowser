@@ -802,13 +802,27 @@ async function doRename(entry) {
   if (!name || name === entry.name) return;
   if (name.includes('/')) return toast('A name cannot contain a slash.', 'err');
 
+  const body = { from: entry.path, to_dir: state.path, new_name: name };
   try {
-    await API.rename({ from: entry.path, to_dir: state.path, new_name: name });
-    toast('Renamed');
-    navigate(state.path, { push: false });
+    await API.rename(body);
   } catch (err) {
-    toast(err.message, 'err');
+    // A name clash is recoverable only with the owner's say-so, so the
+    // conflict becomes one question instead of a dead end.
+    if (!(err instanceof ApiError && err.status === 409)) {
+      toast(err.message, 'err');
+      return;
+    }
+    if (!await confirmSheet(`Replace “${name}”?`, 'A file with that name already exists here.', 'Replace')) return;
+    body.overwrite = true;
+    try {
+      await API.rename(body);
+    } catch (err2) {
+      toast(err2.message, 'err');
+      return;
+    }
   }
+  toast('Renamed');
+  navigate(state.path, { push: false });
 }
 
 async function doDelete(entry) {
@@ -850,10 +864,11 @@ function pickFile(dir, accept) {
  * API still cannot report. The body is the File itself, so the browser streams
  * it without ever materialising it in JS memory.
  */
-function uploadFile(file, dir) {
+function uploadFile(file, dir, overwrite = false) {
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest();
-    const url = `/api/fs/upload?path=${encodeURIComponent(dir)}&name=${encodeURIComponent(file.name)}`;
+    const url = `/api/fs/upload?path=${encodeURIComponent(dir)}&name=${encodeURIComponent(file.name)}` +
+      (overwrite ? '&overwrite=1' : '');
 
     const label = document.createElement('div');
     label.className = 'toast';
@@ -873,6 +888,10 @@ function uploadFile(file, dir) {
       label.remove();
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve(true);
+      } else if (xhr.status === 409 && !overwrite) {
+        // A name clash is the caller's call: give it back so doUpload can
+        // ask before replacing anything.
+        resolve('conflict');
       } else {
         let msg = `Upload failed (${xhr.status})`;
         try { msg = JSON.parse(xhr.responseText).error || msg; } catch { /* keep default */ }
@@ -903,7 +922,15 @@ async function doUpload() {
   let ok = 0;
   for (const file of files) {
     // Sequential, so progress toasts do not pile up and mobile radios stay sane.
-    if (await uploadFile(file, state.path)) ok++;
+    let done = await uploadFile(file, state.path);
+    if (done === 'conflict') {
+      // The outgoing files are never replaced without an owner's
+      // decision; one question per file says exactly what is at stake.
+      if (await confirmSheet(`Replace “${file.name}”?`, 'A file with that name already exists here.', 'Replace')) {
+        done = await uploadFile(file, state.path, true);
+      }
+    }
+    if (done === true) ok++;
   }
   if (ok) {
     toast(`Uploaded ${ok} file${ok === 1 ? '' : 's'}`);

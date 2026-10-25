@@ -16,6 +16,7 @@
 package fs
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -249,7 +250,7 @@ func TestWriteRequiresWriteGrant(t *testing.T) {
 	if err := f.Remove(readOnly, "/photos/a.jpg"); err == nil {
 		t.Error("delete with read-only access should fail")
 	}
-	if _, _, err := f.UploadTarget(readOnly, "/photos", "new.txt"); err == nil {
+	if _, _, err := f.UploadTarget(readOnly, "/photos", "new.txt", false); err == nil {
 		t.Error("upload with read-only access should fail")
 	}
 
@@ -257,7 +258,7 @@ func TestWriteRequiresWriteGrant(t *testing.T) {
 	if _, err := f.Mkdir(writer, "/photos", "newdir"); err != nil {
 		t.Errorf("mkdir with write access should work: %v", err)
 	}
-	if _, _, err := f.UploadTarget(writer, "/photos", "new.txt"); err != nil {
+	if _, _, err := f.UploadTarget(writer, "/photos", "new.txt", false); err != nil {
 		t.Errorf("upload with write access should work: %v", err)
 	}
 
@@ -386,15 +387,22 @@ func TestCleanNormalises(t *testing.T) {
 	}
 }
 
-func TestUploadTargetRejectsDirCollision(t *testing.T) {
+func TestUploadTargetRejectsCollisions(t *testing.T) {
 	f := newTestFS(t)
 	u := user(auth.AccessWrite)
 
-	if _, _, err := f.UploadTarget(u, "/docs", "readme.txt"); err != nil {
-		t.Fatalf("upload over a file should be allowed: %v", err)
+	// An existing file is a conflict until the client asks to replace it.
+	if _, _, err := f.UploadTarget(u, "/docs", "readme.txt", false); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("upload over an unasked file = %v, want an existence error", err)
 	}
-	if _, _, err := f.UploadTarget(u, "/docs", "private"); err == nil {
-		t.Error("uploading onto a directory should be refused")
+	if _, _, err := f.UploadTarget(u, "/docs", "readme.txt", true); err != nil {
+		t.Fatalf("upload over an acknowledged file = %v, want a destination", err)
+	}
+	if _, _, err := f.UploadTarget(u, "/docs", "private", false); !errors.Is(err, os.ErrExist) {
+		t.Errorf("uploading onto a directory = %v", err)
+	}
+	if _, _, err := f.UploadTarget(u, "/docs", "private", true); !errors.Is(err, os.ErrExist) {
+		t.Errorf("overwrite onto a directory = %v", err)
 	}
 }
 
@@ -424,7 +432,7 @@ func TestRenameRequiresWriteOnBothSides(t *testing.T) {
 
 	// Source is read-only, so the move must fail even though the target is
 	// writable: otherwise a user could relocate files they cannot read.
-	if _, err := f.Rename(u, "/photos/a.jpg", "/docs", "stolen.jpg"); err == nil {
+	if _, err := f.Rename(u, "/photos/a.jpg", "/docs", "stolen.jpg", false); err == nil {
 		t.Fatal("rename from a read-only folder should fail")
 	}
 }
@@ -489,16 +497,16 @@ func TestTempNamesAreReserved(t *testing.T) {
 	if _, err := f.Mkdir(u, "/", ".upload-new"); err != ErrReserved {
 		t.Errorf("mkdir with a reserved name: got %v, want ErrReserved", err)
 	}
-	if _, _, err := f.UploadTarget(u, "/", ".upload-froze.tmp"); err != ErrReserved {
+	if _, _, err := f.UploadTarget(u, "/", ".upload-froze.tmp", false); err != ErrReserved {
 		t.Errorf("upload with a reserved name: got %v, want ErrReserved", err)
 	}
 	if err := f.Remove(u, "/.upload-refused.tmp"); err != ErrReserved {
 		t.Errorf("remove a temp name: got %v, want ErrReserved", err)
 	}
-	if _, err := f.Rename(u, "/.upload-refused.tmp", "/", "gone.tmp"); err != ErrReserved {
+	if _, err := f.Rename(u, "/.upload-refused.tmp", "/", "gone.tmp", false); err != ErrReserved {
 		t.Errorf("rename away from a temp name: got %v, want ErrReserved", err)
 	}
-	if _, err := f.Rename(u, "/docs/readme.txt", "/", ".upload-hijack.tmp"); err != ErrReserved {
+	if _, err := f.Rename(u, "/docs/readme.txt", "/", ".upload-hijack.tmp", false); err != ErrReserved {
 		t.Errorf("rename onto a temp name: got %v, want ErrReserved", err)
 	}
 
@@ -572,5 +580,63 @@ func TestSweepUploadTempsErasesAbandonedTemps(t *testing.T) {
 	}
 	if n, err := f.SweepUploadTemps(24 * time.Hour); err != nil || n != 0 {
 		t.Fatalf("clean tree sweep: n=%d err=%v", n, err)
+	}
+}
+
+func TestRenameOverwriteNeedsAsking(t *testing.T) {
+	f := newTestFS(t)
+	u := user(auth.AccessAdmin)
+
+	// Landing on a name already held conflicts, typed so the API layer
+	// maps it to a status rather than a stack. Nothing else moved.
+	if _, err := f.Rename(u, "/docs/readme.txt", "/photos/2024", "a.jpg", false); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("blind overwrite = %v, want an existence error", err)
+	}
+	if _, serr := os.Stat(filepath.Join(mustRoot(f), "docs", "readme.txt")); serr != nil {
+		t.Fatalf("the source did not survive the refusal: %v", serr)
+	}
+	if _, serr := os.Stat(filepath.Join(mustRoot(f), "photos", "2024", "a.jpg")); serr != nil {
+		t.Fatalf("the collision target did not survive the refusal: %v", serr)
+	}
+
+	// Asked for, the move replaces the file wholesale.
+	if _, err := f.Rename(u, "/docs/readme.txt", "/photos/2024", "a.jpg", true); err != nil {
+		t.Fatalf("declared overwrite: %v", err)
+	}
+	if _, serr := os.Stat(filepath.Join(mustRoot(f), "docs", "readme.txt")); !os.IsNotExist(serr) {
+		t.Errorf("the source stayed put after a declared overwrite: %v", serr)
+	}
+
+	// A directory is never devoured, even on an explicit overwrite: a
+	// single move replacing a whole subtree is deletion by common
+	// mistake, not a rename ceremony. A second file was lost already if
+	// this fails.
+	if _, err := f.Rename(u, "/empty", "/", "photos", true); !errors.Is(err, os.ErrExist) {
+		t.Errorf("overwrite onto a directory = %v, want an existence error", err)
+	}
+}
+
+func TestUploadTargetOverwriteNeedsAsking(t *testing.T) {
+	f := newTestFS(t)
+	u := user(auth.AccessAdmin)
+
+	// An existing file is a conflict until the client says otherwise.
+	if _, _, err := f.UploadTarget(u, "/photos/2024", "a.jpg", false); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("blind upload overwrite = %v, want an existence error", err)
+	}
+	if _, _, err := f.UploadTarget(u, "/photos/2024", "a.jpg", true); err != nil {
+		t.Fatalf("declared overwrite = %v, want a destination", err)
+	}
+	// A directory stays a conflict under both modes: a body has no way
+	// to become a directory.
+	if _, _, err := f.UploadTarget(u, "/", "docs", false); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("upload onto a directory = %v, want an existence error", err)
+	}
+	if _, _, err := f.UploadTarget(u, "/", "docs", true); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("overwrite onto a directory = %v, want an existence error", err)
+	}
+	// A fresh name takes no particular mode.
+	if _, _, err := f.UploadTarget(u, "/photos", "new.png", false); err != nil {
+		t.Fatalf("fresh destination = %v", err)
 	}
 }

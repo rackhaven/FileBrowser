@@ -497,9 +497,9 @@ noted.
 | `GET` | `/api/fs/thumb?path=/a.jpg` | small preview; weak `ETag`, so revalidation happens for free |
 | `GET`/`HEAD` | `/api/fs/download?path=/a.txt` | stream; supports `Range`, `?inline=1` |
 | `GET` | `/api/fs/zip?path=/docs` | whole folder as a zip, streamed; same ACL rules as listings |
-| `PUT` | `/api/fs/upload?path=/dir&name=f.txt` | raw body streamed to disk |
+| `PUT` | `/api/fs/upload?path=/dir&name=f.txt` | raw body streamed to disk; an existing file refuses (409) unless `overwrite=1` |
 | `POST` | `/api/fs/mkdir` | `{path, name}` |
-| `POST` | `/api/fs/rename` | `{from, to_dir, new_name}` |
+| `POST` | `/api/fs/rename` | `{from, to_dir, new_name, overwrite}`; an existing file refuses (409) unless `overwrite` is set, and directories are never replaced |
 | `POST` | `/api/fs/copy` | `{from, to_dir, name}`; a sibling duplicate. `to_dir` and `name` are optional: the copy then lands beside the source, under the name the UI proposes. An existing destination refuses (409), never replaced |
 | `POST` | `/api/fs/delete?path=/a.txt` | recursive for folders; the entry moves to the trash, see below |
 | `GET` | `/api/fs/trash` | deleted items the caller may act on, `{entries}` |

@@ -1561,3 +1561,60 @@ func (h *harness) lookup(t *testing.T, username string) *auth.User {
 	}
 	return u
 }
+
+func TestOverwriteNeedsAskingOnBothRoutes(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	// An upload onto an existing file conflicts until the client says
+	// otherwise.
+	resp := h.putBody(client, "/api/fs/upload?path=/docs&name=notes.txt", "text/plain", "REPLACEMENT")
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("upload onto an existing file = %d, want 409", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = h.putBody(client, "/api/fs/upload?path=/docs&name=notes.txt&overwrite=1", "text/plain", "REPLACEMENT")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("upload with declared overwrite = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+	// The replacement is what a reader gets back.
+	resp = h.get(client, "/api/fs/download?path=/docs/notes.txt")
+	landed, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(landed) != "REPLACEMENT" {
+		t.Errorf("after overwrite the file holds %q (status %d)", landed, resp.StatusCode)
+	}
+
+	// Renaming onto a name already held asks the same question.
+	resp = h.post(client, "/api/fs/rename", `{"from":"/docs/notes.txt","to_dir":"/photos","new_name":"b.png"}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("rename onto an existing file = %d, want 409", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if _, serr := os.Stat(filepath.Join(h.root, "docs", "notes.txt")); serr != nil {
+		t.Errorf("the refused rename disturbed its source: %v", serr)
+	}
+	resp = h.post(client, "/api/fs/rename", `{"from":"/docs/notes.txt","to_dir":"/photos","new_name":"b.png","overwrite":true}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("rename with declared overwrite = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if _, serr := os.Stat(filepath.Join(h.root, "docs", "notes.txt")); !os.IsNotExist(serr) {
+		t.Errorf("the source stayed put after a declared overwrite: %v", serr)
+	}
+	if _, serr := os.Stat(filepath.Join(h.root, "photos", "b.png")); serr != nil {
+		t.Errorf("the destination lost its file after the replace: %v", serr)
+	}
+
+	// A directory destination is never devoured, even on an explicit
+	// overwrite: one move replacing a subtree is deletion by mistake.
+	resp = h.post(client, "/api/fs/rename", `{"from":"/docs","to_dir":"/","new_name":"photos","overwrite":true}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("overwrite onto a directory = %d, want 409", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if _, serr := os.Stat(filepath.Join(h.root, "docs")); serr != nil {
+		t.Errorf("the refused dir rename disturbed its source: %v", serr)
+	}
+}

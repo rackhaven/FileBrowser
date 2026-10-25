@@ -71,8 +71,11 @@ func (f *FS) Mkdir(u *auth.User, dir, name string) (Entry, error) {
 
 // UploadTarget validates a destination for an upload and returns the real path
 // to stream into plus its virtual path. The destination need not exist yet,
-// but its parent must exist and be writable.
-func (f *FS) UploadTarget(u *auth.User, dir, name string) (real, vpath string, err error) {
+// but its parent must exist and be writable. Unless overwrite is set, an
+// existing file at the destination is refused rather than silently replaced:
+// an upload the user thought was heading to an empty folder must not devour
+// whatever was already there.
+func (f *FS) UploadTarget(u *auth.User, dir, name string, overwrite bool) (real, vpath string, err error) {
 	vpath, err = Join(dir, name)
 	if err != nil {
 		return "", "", err
@@ -89,10 +92,18 @@ func (f *FS) UploadTarget(u *auth.User, dir, name string) (real, vpath string, e
 	if !within(f.realRoot, resolveFor(target)) {
 		return "", "", ErrForbidden
 	}
-	if info, err := os.Lstat(target); err == nil && info.IsDir() {
-		// Typed as a conflict: an upload onto an existing directory is a
-		// routine refusal, not an internal fault.
-		return "", "", fmt.Errorf("fs: %s is a directory: %w", name, os.ErrExist)
+	if info, err := os.Lstat(target); err == nil {
+		if info.IsDir() {
+			// Typed as a conflict: an upload onto an existing directory
+			// is a routine refusal, not an internal fault, and a body
+			// cannot replace a directory under any flag.
+			return "", "", fmt.Errorf("fs: %s is a directory: %w", name, os.ErrExist)
+		}
+		if !overwrite {
+			return "", "", fmt.Errorf("fs: %s already exists: %w", name, os.ErrExist)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", "", err
 	}
 	return target, vpath, nil
 }
@@ -118,8 +129,10 @@ func (f *FS) Remove(u *auth.User, vpath string) error {
 
 // Rename moves an entry. Write access is required on both the source and the
 // destination directory so a read-only user cannot shuffle files they cannot
-// even see.
-func (f *FS) Rename(u *auth.User, from, toDir, newName string) (Entry, error) {
+// even see. Unless overwrite is true, a destination that already exists is
+// refused with a typed existence error instead of being devoured; the move
+// confirms only what the caller asked to replace.
+func (f *FS) Rename(u *auth.User, from, toDir, newName string, overwrite bool) (Entry, error) {
 	fromVP := Clean(from)
 	if isReservedName(path.Base(fromVP)) {
 		return Entry{}, ErrReserved
@@ -146,6 +159,16 @@ func (f *FS) Rename(u *auth.User, from, toDir, newName string) (Entry, error) {
 	target := filepath.Join(dstDir, newName)
 	if !within(f.realRoot, resolveFor(target)) {
 		return Entry{}, ErrForbidden
+	}
+	if info, err := os.Lstat(target); err == nil {
+		if info.IsDir() || !overwrite {
+			// Typed and decided before the move: os.Rename quietly
+			// replaces files on the ground, so without this check the
+			// default answer to a name collision would be deletion.
+			return Entry{}, fmt.Errorf("fs: %s already exists: %w", newName, os.ErrExist)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return Entry{}, err
 	}
 
 	if err := os.Rename(src, target); err != nil {

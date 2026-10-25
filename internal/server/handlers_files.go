@@ -248,7 +248,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	name := q.Get("name")
 
-	target, vpath, err := s.files.UploadTarget(u, q.Get("path"), name)
+	target, vpath, err := s.files.UploadTarget(u, q.Get("path"), name, q.Get("overwrite") != "")
 	if err != nil {
 		s.writeFSError(w, r, err)
 		return
@@ -352,6 +352,10 @@ type renameRequest struct {
 	From    string `json:"from"`
 	ToDir   string `json:"to_dir"`
 	NewName string `json:"new_name"`
+	// Overwrite lets the caller replace an existing file at the
+	// destination after it has confirmed with a human. Without it a name
+	// collision answers 409 Conflict.
+	Overwrite bool `json:"overwrite"`
 }
 
 // handleRename moves or renames an entry.
@@ -362,7 +366,7 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	entry, err := s.files.Rename(u, req.From, req.ToDir, strings.TrimSpace(req.NewName))
+	entry, err := s.files.Rename(u, req.From, req.ToDir, strings.TrimSpace(req.NewName), req.Overwrite)
 	if err != nil {
 		s.writeFSError(w, r, err)
 		return
