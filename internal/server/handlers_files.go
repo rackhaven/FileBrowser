@@ -173,7 +173,10 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", detectContentType(info.Name()))
-	w.Header().Set("Content-Disposition", contentDisposition(entry.Name, r.URL.Query().Get("inline") == "1"))
+	// The allowlist is the server's decision to make: a query parameter
+	// alone does not turn an arbitrary uploaded file into origin-rendered
+	// content for someone else's browser.
+	w.Header().Set("Content-Disposition", contentDisposition(entry.Name, r.URL.Query().Get("inline") == "1" && canInline(entry.Name)))
 	w.Header().Set("Accept-Ranges", "bytes")
 	// Private: a shared proxy must not cache someone's files.
 	w.Header().Set("Cache-Control", "private, max-age=0, must-revalidate")
@@ -187,6 +190,22 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	s.logf("download", "user", u.Username, "file", entry.Name, "bytes", info.Size())
 	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
+}
+
+// canInline answers whether the browser may render this file in place of a
+// downloaded one. The list is an allowlist of formats a browser displays
+// without giving the page's script a server-origin foothold, because a
+// download link is something a user clicks with their session cookie in
+// their pocket: an uploaded HTML file or SVG served inline every time
+// someone else clicks a shared link is stored page scripting by any other
+// name, on another user's browser. Video, text and everything else gets the
+// default download behaviour, no matter what the loading UI hoped for.
+func canInline(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp", ".pdf":
+		return true
+	}
+	return false
 }
 
 // contentDisposition builds the header. The filename is passed both as ASCII

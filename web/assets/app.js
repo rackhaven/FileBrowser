@@ -182,7 +182,11 @@ function iconFor(entry) {
   return 'file';
 }
 
-const INLINE_OK = /^.(png|jpe?g|gif|webp|avif|bmp|svg|pdf|mp4|webm)$/i;
+// What the browser may render inline, matching the server's allowlist in
+// canInline: raster images and PDF. SVG would be handy but is text with
+// running script inside; the server ignores inline for anything outside
+// this list, so the two layers always agree.
+const INLINE_OK = /^\.(png|jpe?g|gif|webp|avif|bmp|pdf)$/i;
 
 function svgFor(key) {
   const wrap = document.createElementNS('http://www.w3.org/2000/svg', 'svg');

@@ -1618,3 +1618,44 @@ func TestOverwriteNeedsAskingOnBothRoutes(t *testing.T) {
 		t.Errorf("the refused dir rename disturbed its source: %v", serr)
 	}
 }
+
+func TestInlineIsAnAllowlistOnly(t *testing.T) {
+	h := newHarness(t)
+	write(t, h.root, "docs/sheet.svg", `<svg xmlns="http://www.w3.org/2000/svg"/>`)
+	write(t, h.root, "docs/page.html", `<html><script>1</script></html>`)
+	client := h.login("admin", "password123")
+
+	disposition := func(qpath string) (string, string) {
+		t.Helper()
+		resp := h.get(client, qpath)
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s = %d", qpath, resp.StatusCode)
+		}
+		return resp.Header.Get("Content-Disposition"), resp.Header.Get("Content-Type")
+	}
+
+	// Raster and pdf render in place, and are the whole list.
+	got, _ := disposition("/api/fs/download?path=/photos%2F2024%2Fa.jpg&inline=1")
+	if !strings.HasPrefix(got, "inline;") {
+		t.Errorf("jpeg with inline=1 asked for %q", got)
+	}
+	// SVG is scriptable text and lands as a download whatever was asked.
+	got, ct := disposition("/api/fs/download?path=/docs%2Fsheet.svg&inline=1")
+	if !strings.HasPrefix(got, "attachment;") {
+		t.Errorf("svg with inline=1 asked for %q", got)
+	}
+	if ct != "image/svg+xml" {
+		t.Errorf("svg content type = %q", ct)
+	}
+	// HTML does the same.
+	got, _ = disposition("/api/fs/download?path=/docs%2Fpage.html&inline=1")
+	if !strings.HasPrefix(got, "attachment;") {
+		t.Errorf("html with inline=1 asked for %q", got)
+	}
+	// And the default posture stays attachment for everything, as before.
+	got, _ = disposition("/api/fs/download?path=/photos%2F2024%2Fa.jpg")
+	if !strings.HasPrefix(got, "attachment;") {
+		t.Errorf("explicit download = %q", got)
+	}
+}
