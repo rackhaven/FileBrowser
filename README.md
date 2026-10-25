@@ -40,21 +40,41 @@ no cloud service in the middle.
 
 ## Quick start
 
-With Docker:
+The published image is `ghcr.io/rackhaven/filebrowser` (tags `vX.Y.Z` and
+`latest`). It needs two mounts: your files, and a place for its database.
+
+```bash
+docker run -d --name filebrowser \
+  --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --tmpfs /tmp:size=64m \
+  -p 8080:8080 \
+  -v /srv/files:/srv/files \
+  -v filebrowser-data:/data \
+  -e FB_ADMIN_PASSWORD="$(openssl rand -base64 18)" \
+  ghcr.io/rackhaven/filebrowser:latest
+
+docker logs filebrowser      # prints the generated admin password once
+```
+
+Or with compose, which pins, restarts and logs-rotates for you:
 
 ```bash
 git clone https://github.com/rackhaven/FileBrowser
 cd FileBrowser
 
-cp deploy/.env.example .env
-$EDITOR .env              # set FB_ADMIN_PASSWORD
+cp deploy/.env.example deploy/.env
+$EDITOR deploy/.env          # set FB_ADMIN_PASSWORD, maybe FB_TAG and FB_ROOT
 
-# Put your files in ./data/files, or point FB_ROOT at an existing share
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
+The compose file runs the published image by default; `docker compose build`
+swaps in a locally built one from the checked-out tree, which is what an
+air-gapped deployment does.
+
 Open `http://<your-server>:8080`, sign in as `admin`, and change the password
-from the menu.
+from the menu. Also from the menu: the theme, the devices signed in, and the
+trash drawer.
 
 Without Docker, on any Linux box or Raspberry Pi:
 
