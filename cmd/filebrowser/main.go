@@ -150,7 +150,7 @@ func runServe(args []string) error {
 		cfg.TrashTTL = d
 	}
 
-	logger := newLogger()
+	logger := newLogger(cfg.LogLevel)
 
 	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, "users.json"))
 	if err != nil {
@@ -177,6 +177,7 @@ func runServe(args []string) error {
 			SessionTTL:        cfg.SessionTTL,
 			MaxUploadBytes:    cfg.MaxUploadBytes,
 			ThumbCache:        cfg.ThumbCache,
+			DataDir:           cfg.DataDir,
 		},
 		Users:    store,
 		Sessions: sessions,
@@ -248,18 +249,21 @@ func runServe(args []string) error {
 	return <-errCh
 }
 
-// newLogger builds a human-readable logger, honouring FB_LOG_LEVEL.
-func newLogger() *slog.Logger {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("FB_LOG_LEVEL")) {
+// newLogger builds a human-readable logger. The level comes from the config
+// (log_level, with FB_LOG_LEVEL overriding), not from the environment here:
+// one source of truth for what the process will log, validated where the
+// rest of the config is validated.
+func newLogger(level string) *slog.Logger {
+	lvl := slog.LevelInfo
+	switch strings.ToLower(level) {
 	case "debug":
-		level = slog.LevelDebug
+		lvl = slog.LevelDebug
 	case "warn":
-		level = slog.LevelWarn
+		lvl = slog.LevelWarn
 	case "error":
-		level = slog.LevelError
+		lvl = slog.LevelError
 	}
-	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
 }
 
 // bootstrapAdmin makes sure at least one administrator exists.

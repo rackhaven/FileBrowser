@@ -507,8 +507,50 @@ func (s *Server) handleZip(w http.ResponseWriter, r *http.Request) {
 	s.logf("zip", "user", u.Username, "path", fs.Clean(vpath))
 }
 
-// handleHealth is for uptime checks and the Docker HEALTHCHECK.
+// handleHealth is for uptime checks and the Docker HEALTHCHECK. It answers
+// 200 only when serving can actually continue: the data directory exists and
+// accepts a small write, so a full disk or a dislodged volume reports itself
+// instead of keeping a container nominally healthy while every write fails.
+// With no DataDir configured the check degrades to liveness, which is what
+// tests and embedded use want from it anyway.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.DataDir == "" {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, "ok")
+		return
+	}
+
+	info, err := os.Stat(s.cfg.DataDir)
+	if err != nil || !info.IsDir() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintln(w, "data directory unreachable")
+		return
+	}
+
+	// A create is the only honest probe of a possibly-full disk: space the
+	// process can see is not space it can use if a quota or permission
+	// gets in the way between here and the platter.
+	tmp, err := os.CreateTemp(s.cfg.DataDir, ".health-*")
+	if err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintln(w, "data directory is not writable")
+		return
+	}
+	named := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintln(w, "data directory is not writable")
+		_ = os.Remove(named)
+		return
+	}
+	if err := os.Remove(named); err != nil {
+		// The probe file could not be dropped, which is itself a health
+		// signal, but the write did land; report well and keep sweeping.
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintln(w, "data directory is not writable")
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintln(w, "ok")
 }

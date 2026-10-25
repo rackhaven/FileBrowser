@@ -18,7 +18,8 @@ root: /srv/files
 data_dir: /var/lib/filebrowser
 
 # How long a sign-in stays valid. The window slides while a user is active.
-# Sessions live in memory, so a restart signs everyone out.
+# Sessions persist on disk in the data directory, so a restart keeps
+# everybody signed in.
 session_ttl: 168h   # 7 days
 
 # --- TLS ---------------------------------------------------------------------
@@ -58,3 +59,9 @@ trust_proxy_headers: false
 # data directory. Derived data only: deleting the folder is always safe.
 #
 # thumb_cache: /data/thumbs
+
+# --- Logging -----------------------------------------------------------------
+# Minimum level: debug, info, warn or error. The environment variable
+# FB_LOG_LEVEL overrides the file.
+#
+# log_level: info

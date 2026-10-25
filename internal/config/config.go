@@ -62,6 +62,10 @@ type Config struct {
 	// it is deleted: the cache is derived data and must not become the
 	// biggest growth in the tree. Zero keeps previews until hands clean.
 	ThumbTTL time.Duration `yaml:"thumb_ttl"`
+	// LogLevel is the slog minimum: debug, info, warn or error. Empty
+	// means info. Operational, not correctness-relevant, but a typo should
+	// still be a config error rather than silence.
+	LogLevel string `yaml:"log_level"`
 	// AllowSignup is intentionally not supported: accounts are created by an
 	// admin so the service can never be self-serve on a public network.
 }
@@ -137,6 +141,18 @@ func Load(path string) (Config, error) {
 			}
 			cfg.ThumbTTL = d
 		}
+	}
+
+	if v, ok := os.LookupEnv("FB_LOG_LEVEL"); ok {
+		if level := strings.TrimSpace(v); level != "" {
+			cfg.LogLevel = level
+		}
+	}
+
+	switch strings.ToLower(cfg.LogLevel) {
+	case "", "debug", "info", "warn", "error":
+	default:
+		return cfg, fmt.Errorf("log_level must be debug, info, warn or error, not %q", cfg.LogLevel)
 	}
 
 	if cfg.Listen == "" {

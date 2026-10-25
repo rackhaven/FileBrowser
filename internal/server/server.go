@@ -52,6 +52,10 @@ type Config struct {
 	// thumbnails. A path that cannot be created only demotes thumbnails to
 	// the uncacheable path, it never takes the server down.
 	ThumbCache string
+	// DataDir is where stores live, so the health endpoint can prove the
+	// process can still write where it must. Empty skips that check, which
+	// is for tests and embedded use; main always sets it.
+	DataDir string
 }
 
 // defaultMaxUpload is used whenever no usable cap is supplied. It is the

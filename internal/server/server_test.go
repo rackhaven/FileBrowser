@@ -1659,3 +1659,45 @@ func TestInlineIsAnAllowlistOnly(t *testing.T) {
 		t.Errorf("explicit download = %q", got)
 	}
 }
+
+func TestHealthAnswersPerDataDirectoryReality(t *testing.T) {
+	// The Docker HEALTHCHECK asks the honest question, so the endpoint
+	// must refuse to answer 200 when the process cannot perform.
+	data := t.TempDir()
+	h := newHarnessWithConfig(t, Config{SessionTTL: time.Hour, DataDir: data})
+
+	gauge := func(hh *harness) int {
+		t.Helper()
+		resp := hh.get(http.DefaultClient, "/healthz")
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// A live, writable directory is healthy, and probing it leaves
+	// nothing behind and does not wear out its welcome.
+	if got := gauge(h); got != http.StatusOK {
+		t.Errorf("healthz with a live data dir = %d, want 200", got)
+	}
+	again := newHarnessWithConfig(t, Config{SessionTTL: time.Hour, DataDir: data})
+	if got := gauge(again); got != http.StatusOK {
+		t.Errorf("healthz still healthy after the first probe = %d, want 200", got)
+	}
+
+	// A dislodged data directory is not healthy: stat answers nothing.
+	away := newHarnessWithConfig(t, Config{SessionTTL: time.Hour, DataDir: filepath.Join(data, "no-such-place")})
+	if got := gauge(away); got != http.StatusServiceUnavailable {
+		t.Errorf("healthz with a missing data dir = %d, want 503", got)
+	}
+
+	// A plain file posing as the data directory: the create probe fails
+	// under any operating system, because the "directory" is not one.
+	stale := t.TempDir()
+	cork := filepath.Join(stale, "users.json")
+	if err := os.WriteFile(cork, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	corked := newHarnessWithConfig(t, Config{SessionTTL: time.Hour, DataDir: cork})
+	if got := gauge(corked); got != http.StatusServiceUnavailable {
+		t.Errorf("healthz with a file as data dir = %d, want 503", got)
+	}
+}
