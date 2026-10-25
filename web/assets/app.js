@@ -402,7 +402,13 @@ function renderList() {
  * grows in place so the browser keeps the user's scroll position instead of
  * jumping to the top of a reloaded folder.
  */
+let loadMoreBusy = false;
 async function loadMore() {
+  // Two clicks before the first answer comes back would append the same
+  // page twice: the guard makes the row and its button calm down until
+  // the page in flight lands.
+  if (loadMoreBusy || !state.more) return;
+  loadMoreBusy = true;
   try {
     const data = await API.list(state.path, { offset: state.entries.length, limit: LIST_PAGE });
     state.entries = state.entries.concat(data.entries || []);
@@ -412,6 +418,8 @@ async function loadMore() {
   } catch (err) {
     if (err.status === 401) return showLogin();
     toast(err.message, 'err');
+  } finally {
+    loadMoreBusy = false;
   }
 }
 
@@ -432,12 +440,26 @@ function isPreviewable(name) {
   return /\.(jpe?g|png|gif)$/i.test(name || '');
 }
 
+let quotaBusy = false;
+const quotaSeen = new Map();
+const QUOTA_MIN_GAP = 15000;
 async function refreshQuota() {
+  // The usage call walks the whole visible tree, so it is the heaviest
+  // read the UI peppers the server with: one per folder click more or
+  // less. Only one walk may run at any time, identical-for-path repeats
+  // inside the gap window are skipped, and a walk that lands after the
+  // user left the folder does not repaint someone else's numbers.
+  const path = state.path;
+  if (quotaBusy || Date.now() - (quotaSeen.get(path) || 0) < QUOTA_MIN_GAP) return;
+  quotaBusy = true;
   try {
-    const u = await API.usage(state.path);
-    el.quota.textContent = `${formatBytes(u.bytes)} · ${u.files} files`;
+    const u = await API.usage(path);
+    if (state.path === path) el.quota.textContent = `${formatBytes(u.bytes)} · ${u.files} files`;
+    quotaSeen.set(path, Date.now());
   } catch {
-    el.quota.textContent = '';
+    if (state.path === path) el.quota.textContent = '';
+  } finally {
+    quotaBusy = false;
   }
 }
 
@@ -962,10 +984,14 @@ async function doMkdir() {
 
 // ---------------------------------------------------------------- search ---
 
+let searchTimer = null;
 function onSearchInput() {
   state.filter = $('search-input').value.trim().toLowerCase();
+  // The local filter above renders instantly; the whole-subtree server
+  // walk waits for typing to settle instead of firing once per key.
   renderList();
-  updateSearchResults();
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(updateSearchResults, 250);
 }
 
 /**
