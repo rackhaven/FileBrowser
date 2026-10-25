@@ -47,7 +47,9 @@ func (f *FS) Mkdir(u *auth.User, dir, name string) (Entry, error) {
 	}
 	if err := os.Mkdir(target, 0o755); err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return Entry{}, fmt.Errorf("fs: %s already exists", name)
+			// Typed, so the API layer answers 409 instead of the generic
+			// 500 that an untyped error would earn a routine user action.
+			return Entry{}, fmt.Errorf("fs: %s already exists: %w", name, os.ErrExist)
 		}
 		return Entry{}, err
 	}
@@ -88,7 +90,9 @@ func (f *FS) UploadTarget(u *auth.User, dir, name string) (real, vpath string, e
 		return "", "", ErrForbidden
 	}
 	if info, err := os.Lstat(target); err == nil && info.IsDir() {
-		return "", "", fmt.Errorf("fs: %s is a directory", name)
+		// Typed as a conflict: an upload onto an existing directory is a
+		// routine refusal, not an internal fault.
+		return "", "", fmt.Errorf("fs: %s is a directory: %w", name, os.ErrExist)
 	}
 	return target, vpath, nil
 }

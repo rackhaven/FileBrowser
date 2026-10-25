@@ -1445,3 +1445,39 @@ func decodeMsg(resp *http.Response) string {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	return string(body)
 }
+
+func TestDuplicateNamesAnswerConflict(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	// Creating a folder over an existing name is an everyday slip: it must
+	// read as a conflict, never as an internal error.
+	resp := h.post(client, "/api/fs/mkdir", `{"path":"/","name":"docs"}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("mkdir over existing folder = %d, want 409", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Uploading onto a directory name is the same kind of refusal. The
+	// conflict short-circuits before the body is read, so an empty body is
+	// expected rather than a bug.
+	resp = h.putBody(client, "/api/fs/upload?path=/&name=photos", "application/octet-stream", "JPEGDATA")
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("upload onto a directory name = %d, want 409", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func (h *harness) putBody(client *http.Client, path, contentType, body string) *http.Response {
+	h.t.Helper()
+	req, err := http.NewRequest(http.MethodPut, h.server.URL+path, strings.NewReader(body))
+	if err != nil {
+		h.t.Fatalf("PUT %s: %v", path, err)
+	}
+	req.Header.Set("Content-Type", contentType)
+	resp, err := client.Do(req)
+	if err != nil {
+		h.t.Fatalf("PUT %s: %v", path, err)
+	}
+	return resp
+}
