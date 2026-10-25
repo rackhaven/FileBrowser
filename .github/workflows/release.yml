@@ -85,7 +85,7 @@ jobs:
       # needs emulation even though the binaries cross-compile natively.
       - uses: docker/setup-qemu-action@v3
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       # The Dockerfile builds and tests the same tree itself, so the image
       # is never assembled from a tree that failed the suite. The suite
