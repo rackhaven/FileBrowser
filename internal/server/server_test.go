@@ -1481,3 +1481,83 @@ func (h *harness) putBody(client *http.Client, path, contentType, body string) *
 	}
 	return resp
 }
+
+func TestForcedPasswordChangeBlocksEverythingElse(t *testing.T) {
+	h := newHarness(t)
+
+	// An admin resets dave's password: the next sign-in must change it.
+	if _, err := h.users.Create("dave", "password123", false, []auth.Grant{
+		{Path: "/", Level: auth.AccessRead},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.users.SetPassword(h.lookup(t, "dave").ID, "temp-password", true); err != nil {
+		t.Fatal(err)
+	}
+	client := h.login("dave", "temp-password")
+
+	// Reading files is refused, with a marker the UI reacts to.
+	resp := h.get(client, "/api/fs/list?path=/")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("list while forced change = %d, want 403", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	resp.Body.Close()
+	if !strings.Contains(string(body), `"must_change_password":true`) {
+		t.Errorf("refusal does not carry the marker: %s", body)
+	}
+	// Writing is equally refused.
+	resp = h.post(client, "/api/fs/mkdir", `{"path":"/","name":"x"}`)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("mkdir while forced change = %d, want 403", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Authentication housekeeping still answers.
+	resp = h.get(client, "/api/auth/me")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("me while forced change = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = h.post(client, "/api/auth/password", `{"current_password":"temp-password","new_password":"stronger-pass"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("password change = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// The same session cookie survives the rotation and now works.
+	resp = h.get(client, "/api/fs/list?path=/")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("list after change = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// A fresh sign-in for the same account says nothing needs changing.
+	data := h.loginJSON(t, client, "dave", "stronger-pass")
+	if data["must_change_password"] == true {
+		t.Error("a changed password must not carry the forced flag")
+	}
+}
+
+func (h *harness) loginJSON(t *testing.T, client *http.Client, user, pass string) map[string]any {
+	t.Helper()
+	resp := h.post(client, "/api/auth/login", `{"username":"`+user+`","password":"`+pass+`"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login %s: %d", user, resp.StatusCode)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func (h *harness) lookup(t *testing.T, username string) *auth.User {
+	t.Helper()
+	u, err := h.users.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("lookup %s: %v", username, err)
+	}
+	return u
+}

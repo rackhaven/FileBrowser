@@ -71,6 +71,10 @@ async function req(method, url, body) {
   const data = isJSON ? await res.json().catch(() => null) : null;
 
   if (!res.ok) {
+    // The server refuses everything but password housekeeping while a
+    // change is pending; show that screen immediately rather than a
+    // pile of toasts for background calls that all fail the same way.
+    if (data && data.must_change_password) showPasswordChange();
     throw new ApiError(res.status, (data && data.error) || `Request failed (${res.status})`);
   }
   return data;

@@ -161,12 +161,36 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
+		// A forced password change means exactly that: until the password
+		// has been rotated (or signed out from), the only things this
+		// session may do are authentication housekeeping, so a temporary
+		// password an admin handed out is never a working key to the rest
+		// of the API. The client reacts to the marker and walks the user
+		// into the change-password screen.
+		if user.MustChangePassword && !isAuthHousekeeping(r.URL.Path) {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error":                "change your password before continuing",
+				"must_change_password": true,
+			})
+			return
+		}
+
 		s.sessions.Touch(tok) // sliding expiry for active users
 		ctx := context.WithValue(r.Context(), ctxUser, user)
 		ctx = context.WithValue(ctx, ctxToken, tok)
 		ctx = context.WithValue(ctx, ctxSess, sess)
 		next(w, r.WithContext(ctx))
 	}
+}
+
+// isAuthHousekeeping reports whether path is one of the few authenticated
+// endpoints a session with a forced password change may still use.
+func isAuthHousekeeping(path string) bool {
+	return path == "/api/auth/password" ||
+		path == "/api/auth/logout" ||
+		path == "/api/auth/me" ||
+		path == "/api/auth/sessions" ||
+		path == "/api/status"
 }
 
 // requireAdmin additionally insists on the admin flag.
