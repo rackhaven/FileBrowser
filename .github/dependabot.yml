@@ -1,0 +1,20 @@
+# Dependabot opens upgrade PRs for the module's pinned dependencies and for
+# the actions this repository's workflows run. Weekly, Monday at noon UTC, so
+# opened pull requests cluster in one review pass instead of arriving all
+# week; the alert database does the vulnerability versioning, as the x/crypto
+# bump showed when sixteen alerts had to be retired by hand.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
