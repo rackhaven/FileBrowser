@@ -208,7 +208,13 @@ function toast(message, kind = '') {
 
 // --------------------------------------------------------------- panels ---
 
+let panelOpener = null;
+
 function openPanel(node) {
+  // Remember where focus came from: Escape and the close buttons hand it
+  // back when their panel dies, so a keyboard user never lands in the
+  // page body with no idea where they are.
+  panelOpener = document.activeElement;
   el.menu.hidden = true;
   el.admin.hidden = true;
   el.searchpane.hidden = true;
@@ -216,15 +222,23 @@ function openPanel(node) {
   el.sessionspane.hidden = true;
   node.hidden = false;
   el.scrim.hidden = false;
+  // The menu button is the only opener that toggles a state a screen
+  // reader can announce; the rest are drawers, not toggles.
+  $('btn-menu').setAttribute('aria-expanded', String(node === el.menu));
 }
 
 function closePanels() {
-  el.menu.hidden = true;
-  el.admin.hidden = true;
-  el.searchpane.hidden = true;
-  el.trashpane.hidden = true;
-  el.sessionspane.hidden = true;
+  let wasOpen = false;
+  for (const node of [el.menu, el.admin, el.searchpane, el.trashpane, el.sessionspane]) {
+    if (!node.hidden) wasOpen = true;
+    node.hidden = true;
+  }
   el.scrim.hidden = true;
+  $('btn-menu').setAttribute('aria-expanded', 'false');
+  if (wasOpen && panelOpener && panelOpener.isConnected) {
+    panelOpener.focus();
+  }
+  panelOpener = null;
 }
 
 // ---------------------------------------------------------------- sheet ---
@@ -573,7 +587,9 @@ async function renderTrash() {
   try {
     const data = await API.trash();
     const entries = data.entries || [];
-    $('trash-empty').hidden = entries.length === 0;
+    // The wipe is admin-only server-side, so the button should not tease
+    // a permission error at everyone else.
+    $('trash-empty').hidden = !(state.user && state.user.admin) || entries.length === 0;
 
     if (entries.length === 0) {
       box.replaceChildren(trashNote('Nothing deleted. Deleting sends items here, not off the disk.'));
@@ -626,7 +642,8 @@ function trashRow(entry) {
   shred.className = 'trash-erase';
   shred.textContent = 'Erase';
   shred.addEventListener('click', async () => {
-    if (!confirm(`Erase ${entry.original_path || entry.name} for good?`)) return;
+    if (!await confirmSheet(`Erase ${entry.original_path || entry.name} for good?`,
+      'This is not the trash: the bytes leave the disk.', 'Erase')) return;
     try {
       await API.trashDelete(entry.name);
       renderTrash();
@@ -699,7 +716,8 @@ function sessRow(sess) {
   end.disabled = !!sess.current;
   end.hidden = !!sess.current;
   end.addEventListener('click', async () => {
-    if (!confirm('Sign that device out now?')) return;
+    if (!await confirmSheet('Sign that device out now?',
+      'It will have to sign in again.', 'Sign out')) return;
     try {
       await API.endSession(sess.id);
       renderSessions();
@@ -762,19 +780,26 @@ function openDetail(entry) {
   $('d-rename').hidden = !canModify;
   $('d-delete').hidden = !canModify;
 
-  $('d-download').onclick = () => { el.detail.hidden = true; doDownload(entry); };
+  // The sheet vanishes under Escape like every other layer, so the row
+  // that opened it keeps the user's place.
+  panelOpener = document.activeElement;
+  $('d-download').onclick = () => { closeDetail(); doDownload(entry); };
   $('d-copy').hidden = !canModify;
-  $('d-copy').onclick = () => { el.detail.hidden = true; doCopy(entry); };
-  $('d-rename').onclick = () => { el.detail.hidden = true; doRename(entry); };
-  $('d-delete').onclick = () => { el.detail.hidden = true; doDelete(entry); };
-  $('d-cancel').onclick = () => {
-    el.detail.hidden = true;
-    // Reset selection so the next tap downloads again instead of reopening.
-    state.selected = null;
-    for (const prev of el.list.querySelectorAll('.sel')) prev.classList.remove('sel');
-  };
+  $('d-copy').onclick = () => { closeDetail(); doCopy(entry); };
+  $('d-rename').onclick = () => { closeDetail(); doRename(entry); };
+  $('d-delete').onclick = () => { closeDetail(); doDelete(entry); };
+  $('d-cancel').onclick = closeDetail;
 
   el.detail.hidden = false;
+}
+
+function closeDetail() {
+  el.detail.hidden = true;
+  // Reset selection so the next tap downloads again instead of reopening.
+  state.selected = null;
+  for (const prev of el.list.querySelectorAll('.sel')) prev.classList.remove('sel');
+  if (panelOpener && panelOpener.isConnected) panelOpener.focus();
+  panelOpener = null;
 }
 
 async function doDownload(entry) {
@@ -876,9 +901,22 @@ function pickFile(dir, accept) {
     input.type = 'file';
     input.multiple = true;
     if (accept) input.accept = accept;
-    input.addEventListener('change', () => resolve(Array.from(input.files || [])), { once: true });
-    // A cancelled picker fires no event in most browsers; the promise simply
-    // never resolves, which is harmless because nothing awaits it later.
+    let done = false;
+    const finish = (files) => {
+      if (done) return;
+      done = true;
+      window.removeEventListener('focus', onRefocus);
+      resolve(files);
+    };
+    input.addEventListener('change', () => finish(Array.from(input.files || [])), { once: true });
+    // Browsers that announce a dismissed picker do so through cancel.
+    input.addEventListener('cancel', () => finish([]));
+    // The rest say nothing at all; the window regaining focus without a
+    // pick event is the only tell. The beat before resolving keeps this
+    // fallback from outrunning a change event that arrives a hair after
+    // the picker is dismissed with a selection in hand.
+    const onRefocus = () => setTimeout(() => finish([]), 400);
+    window.addEventListener('focus', onRefocus, { once: true });
     input.click();
   });
 }
@@ -1358,6 +1396,16 @@ function wire() {
   $('admin-close').addEventListener('click', closePanels);
   $('search-close').addEventListener('click', closePanels);
 
+  // Escape peels back the topmost layer only: the sheet dialog governs
+  // itself, the detail sheet and the panels each close on their own
+  // Escape, and a page with nothing open notices none of it.
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (el.sheet.open) return;
+    if (!el.detail.hidden) { closeDetail(); return; }
+    closePanels();
+  });
+
   // Browser back/forward between folders. popstate fires for both
   // pushState-created entries and real history navigation.
   window.addEventListener('popstate', () => {
@@ -1379,7 +1427,8 @@ function wire() {
   });
   $('trash-close').addEventListener('click', closePanels);
   $('trash-empty').addEventListener('click', async () => {
-    if (!confirm('Erase every deleted item for everyone? This cannot be undone.')) return;
+    if (!await confirmSheet('Erase every deleted item for everyone?',
+      'This cannot be undone. Restore first if something might still be wanted.', 'Erase all')) return;
     try {
       await API.trashEmpty();
       renderTrash();
