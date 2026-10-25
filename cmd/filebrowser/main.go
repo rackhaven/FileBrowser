@@ -186,12 +186,11 @@ func runServe(args []string) error {
 		Logger:   logger,
 	})
 
-	// Deleted entries age out of both trash and preview cache quietly:
+	// Deleted entries age out of the trash and preview cache, and upload
+	// temporaries left by crashed requests erode away on a fixed window:
 	// retention is a server policy, not something each user is asked
 	// about at delete time.
-	if cfg.TrashTTL > 0 || cfg.ThumbTTL > 0 {
-		go housekeeping(files, cfg.TrashTTL, cfg.ThumbTTL, logger)
-	}
+	go housekeeping(files, cfg.TrashTTL, cfg.ThumbTTL, logger)
 
 	httpServer := &http.Server{
 		Addr:    cfg.Listen,
@@ -316,7 +315,9 @@ func bootstrapAdmin(store *auth.Store, dataDir string, logger *slog.Logger) erro
 // housekeeping runs the retention windows in the background: a sweep at
 // start-up, then once a day. The retention clocks are days, so daily
 // runs keep every entry within a day of its window; pacing any tighter
-// only burns cycles on directory reads.
+// only burns cycles on directory reads. Abandoned upload temporaries
+// ride along on a fixed window: their owners either finish or crash
+// within minutes, so anything a day old is beyond every doubt.
 func housekeeping(files *fs.FS, trashTTL, thumbTTL time.Duration, log *slog.Logger) {
 	for i := 0; ; i++ {
 		// Read-and-remove races with restore and wipe by idempotent
@@ -336,6 +337,13 @@ func housekeeping(files *fs.FS, trashTTL, thumbTTL time.Duration, log *slog.Logg
 			} else if n > 0 {
 				log.Info("thumbnail retention", "erased", n)
 			}
+		}
+		// Every maker of a .upload- temp renames or removes it on the way
+		// out; the ones still on disk are the way-outs that never came.
+		if n, err := files.SweepUploadTemps(24 * time.Hour); err != nil {
+			log.Error("upload temp retention", "err", err)
+		} else if n > 0 {
+			log.Info("upload temp retention", "erased", n)
 		}
 		time.Sleep(24 * time.Hour)
 	}

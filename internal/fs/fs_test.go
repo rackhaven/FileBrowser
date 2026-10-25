@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rackhaven/filebrowser/internal/auth"
 )
@@ -510,3 +511,66 @@ func TestTempNamesAreReserved(t *testing.T) {
 // mustRoot returns the filesystem's real root, for planting temp files on
 // disk directly (the API itself refuses to create them).
 func mustRoot(f *FS) string { return f.Root() }
+
+func TestSweepUploadTempsErasesAbandonedTemps(t *testing.T) {
+	f := newTestFS(t)
+	root := mustRoot(f)
+
+	// A crashed upload leaves an unfinished temp file behind, wherever the
+	// destination folder was.
+	stale := filepath.Join(root, "docs", ".upload-crashed")
+	if err := os.WriteFile(stale, []byte("half"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Copies and folder duplicates leave directories of the same prefix,
+	// nested one level down where the copy landed.
+	staleDir := filepath.Join(root, "photos", ".upload-copy-old")
+	if err := os.Mkdir(staleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staleDir, "part"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{stale, staleDir} {
+		old := time.Now().Add(-26 * time.Hour)
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A live upload is a temp the same age as the request it belongs to,
+	// and everything ordinary keeps its name untouched.
+	live := filepath.Join(root, ".upload-live")
+	if err := os.WriteFile(live, []byte("streaming"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := f.SweepUploadTemps(24 * time.Hour)
+	if err != nil {
+		t.Fatalf("SweepUploadTemps: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("sweep removed %d, want 2", n)
+	}
+	if _, serr := os.Lstat(stale); !os.IsNotExist(serr) {
+		t.Errorf("the crashed upload's temp survived: %v", serr)
+	}
+	if _, serr := os.Lstat(staleDir); !os.IsNotExist(serr) {
+		t.Errorf("the abandoned copy directory survived: %v", serr)
+	}
+	if _, serr := os.Lstat(live); serr != nil {
+		t.Errorf("the live upload's temp did not survive: %v", serr)
+	}
+	if _, serr := os.Stat(filepath.Join(root, "docs", "readme.txt")); serr != nil {
+		t.Errorf("an ordinary file did not survive: %v", serr)
+	}
+
+	// Zero disables the sweep, and a second pass over the clean tree
+	// removes nothing further.
+	if n, err := f.SweepUploadTemps(0); err != nil || n != 0 {
+		t.Fatalf("zero window must disable: n=%d err=%v", n, err)
+	}
+	if n, err := f.SweepUploadTemps(24 * time.Hour); err != nil || n != 0 {
+		t.Fatalf("clean tree sweep: n=%d err=%v", n, err)
+	}
+}
