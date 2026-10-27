@@ -56,10 +56,38 @@ jobs:
           cache: true
 
       - name: Fuzz the path joiner
-        run: go test ./internal/fs -run '^$' -fuzz '^FuzzJoin$' -fuzztime 30s
+        # One retry around both fuzz steps: the engine occasionally warns
+        # out of a run with a bare "context deadline exceeded", no crash
+        # input and no minimized case, once the corpus runs deep enough
+        # to keep a worker busy at the wind-down. A re-run of the same
+        # job on this very commit went green. A genuinely failing input
+        # cannot hide behind that: go's fuzzer minimizes it and pins it
+        # into testdata, where the ordinary test suite fails on it
+        # before either attempt matters.
+        run: |
+          set -u
+          attempts=0
+          until go test ./internal/fs -run '^$' -fuzz '^FuzzJoin$' -fuzztime 30s; do
+            attempts=$((attempts + 1))
+            if [ "$attempts" -ge 2 ]; then
+              echo "fuzz the path joiner: both attempts failed"
+              exit 1
+            fi
+            echo "first attempt failed; retrying once"
+          done
 
       - name: Fuzz the path resolver
-        run: go test ./internal/fs -run '^$' -fuzz '^FuzzResolve$' -fuzztime 30s
+        run: |
+          set -u
+          attempts=0
+          until go test ./internal/fs -run '^$' -fuzz '^FuzzResolve$' -fuzztime 30s; do
+            attempts=$((attempts + 1))
+            if [ "$attempts" -ge 2 ]; then
+              echo "fuzz the path resolver: both attempts failed"
+              exit 1
+            fi
+            echo "first attempt failed; retrying once"
+          done
 
   build:
     runs-on: ubuntu-latest
