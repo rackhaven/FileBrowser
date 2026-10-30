@@ -137,22 +137,75 @@ func Join(dir, name string) (string, error) {
 // absolute path, a symlink pointing outside) so callers do not leak the
 // difference between "denied" and "missing".
 func (f *FS) Resolve(u *auth.User, vpath string, need auth.AccessLevel) (string, error) {
+	real, _, err := f.resolveVP(u, vpath, need)
+	return real, err
+}
+
+// resolveVP is Resolve that also reports realVP, the virtual path of where
+// the entry really lives once symlinks are followed.
+//
+// A symlink is followed only as far as the user could have walked on their
+// own: the place it lands needs the same level as the path that named it.
+// Without this, any link inside a readable folder would lend its reader
+// whatever the link points at. A refusal there answers ErrNotExist, the same
+// as a link pointing out of the root, because listings hide such links too.
+func (f *FS) resolveVP(u *auth.User, vpath string, need auth.AccessLevel) (real, realVP string, err error) {
 	vp := Clean(vpath)
-
-	if vp == "/" {
-		if !f.allowed(u, vp, need) {
-			return "", ErrForbidden
-		}
-		return f.realRoot, nil
-	}
-
 	if !f.allowed(u, vp, need) {
-		return "", ErrForbidden
+		return "", "", ErrForbidden
 	}
+	real, realVP, err = f.locate(vp)
+	if err != nil {
+		return "", "", err
+	}
+	if realVP != vp && !f.allowed(u, realVP, need) {
+		return "", "", ErrNotExist
+	}
+	return real, realVP, nil
+}
 
-	real := filepath.Join(f.realRoot, filepath.FromSlash(strings.TrimPrefix(vp, "/")))
+// resolveEntry is resolveVP for operations on an entry itself rather than on
+// what it points to (delete, move, replace). The final component is not
+// followed: a symlink is judged where it sits, since the operation moves the
+// link and never touches its target. Containment of the full path is still
+// proven, so an entry that escapes the root stays unreachable.
+func (f *FS) resolveEntry(u *auth.User, vpath string, need auth.AccessLevel) (real, realVP string, err error) {
+	vp := Clean(vpath)
+	if vp == "/" {
+		return f.resolveVP(u, vp, need)
+	}
+	if !f.allowed(u, vp, need) {
+		return "", "", ErrForbidden
+	}
+	if _, _, err := f.locate(vp); err != nil {
+		return "", "", err
+	}
+	parentReal, parentRealVP, err := f.locate(parentDir(vp))
+	if err != nil {
+		return "", "", err
+	}
+	name := path.Base(vp)
+	realVP, err = Join(parentRealVP, name)
+	if err != nil {
+		return "", "", err
+	}
+	if realVP != vp && !f.allowed(u, realVP, need) {
+		return "", "", ErrNotExist
+	}
+	return filepath.Join(parentReal, name), realVP, nil
+}
+
+// locate maps a cleaned virtual path to disk and proves it stays inside the
+// root, without consulting any ACL. It returns the unresolved real path
+// (operating on the original path keeps os.Create/truncate semantics
+// predictable) and the virtual path of where it resolves to.
+func (f *FS) locate(vp string) (real, realVP string, err error) {
+	if vp == "/" {
+		return f.realRoot, "/", nil
+	}
+	real = filepath.Join(f.realRoot, filepath.FromSlash(strings.TrimPrefix(vp, "/")))
 	if !within(f.realRoot, real) {
-		return "", ErrNotExist
+		return "", "", ErrNotExist
 	}
 
 	// The lexical check above is not enough: a symlink inside the root can
@@ -161,18 +214,59 @@ func (f *FS) Resolve(u *auth.User, vpath string, need auth.AccessLevel) (string,
 	resolved, err := resolveExisting(real)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return "", ErrNotExist
+			return "", "", ErrNotExist
 		}
-		return "", err
+		return "", "", err
 	}
-	if !within(f.realRoot, resolved) {
-		return "", ErrNotExist
+	realVP, ok := f.virtualOf(resolved)
+	if !ok {
+		return "", "", ErrNotExist
 	}
+	return real, realVP, nil
+}
 
-	// Return the unresolved path: operating on the original path keeps
-	// os.Create/truncate semantics predictable, and we have already proved it
-	// stays inside the root.
-	return real, nil
+// virtualOf expresses a resolved real path as a virtual one; ok is false
+// when it lies outside the root.
+func (f *FS) virtualOf(resolved string) (string, bool) {
+	if !within(f.realRoot, resolved) {
+		return "", false
+	}
+	rel, err := filepath.Rel(f.realRoot, resolved)
+	if err != nil {
+		return "", false
+	}
+	return Clean(filepath.ToSlash(rel)), true
+}
+
+// levelAt is the user's level on an entry named vp whose real location is
+// realVP: the weaker of the two, so a symlink never lends more access than
+// its target already grants.
+func levelAt(u *auth.User, vp, realVP string) auth.AccessLevel {
+	level := u.EffectiveLevel(vp)
+	if realVP != vp {
+		if target := u.EffectiveLevel(realVP); target < level {
+			level = target
+		}
+	}
+	return level
+}
+
+// passable reports whether a folder the user cannot read still leads to
+// something they can, under both of its names.
+func passable(u *auth.User, vp, realVP string) bool {
+	return u.HasAnyGrantUnder(vp) && (realVP == vp || u.HasAnyGrantUnder(realVP))
+}
+
+// Level is the user's level on vpath, symlinks taken into account; AccessNone
+// when the path cannot be located. The listing handler uses it to decide
+// whether to offer uploads into a folder.
+func (f *FS) Level(u *auth.User, vpath string) auth.AccessLevel {
+	vp := Clean(vpath)
+	_, realVP, err := f.locate(vp)
+	if err != nil {
+		return auth.AccessNone
+	}
+	return levelAt(u, vp, realVP)
 }
 
 // allowed applies the ACL. Admins bypass it entirely.
@@ -192,48 +286,31 @@ func (f *FS) allowed(u *auth.User, vpath string, need auth.AccessLevel) bool {
 // ResolveForList is Resolve with the relaxed rule used for directory listings,
 // so a user granted only /photos/private can still open /photos and see it.
 func (f *FS) ResolveForList(u *auth.User, vpath string) (string, error) {
-	vp := Clean(vpath)
-	if u != nil && !u.Disabled && u.Admin {
-		return f.Resolve(u, vp, auth.AccessRead)
-	}
-	if u == nil || u.Disabled {
-		return "", ErrForbidden
-	}
-	if u.EffectiveLevel(vp) >= auth.AccessRead {
-		return f.Resolve(u, vp, auth.AccessRead)
-	}
-	if u.HasAnyGrantUnder(vp) {
-		// Grant lives below this folder. The folder itself is not readable, so
-		// only allow traversal when there is nothing sensitive to leak: we
-		// still list through Resolve so the path is proven inside the root.
-		return f.resolveUnchecked(vp)
-	}
-	return "", ErrForbidden
+	real, _, err := f.resolveForListVP(u, vpath)
+	return real, err
 }
 
-// resolveUnchecked maps vpath to disk after proving it stays inside the root,
-// without requiring an ACL grant on the path itself. Callers must only use it
-// together with ResolveForList, which filters what is returned.
-func (f *FS) resolveUnchecked(vpath string) (string, error) {
+// resolveForListVP is ResolveForList that also reports the folder's real
+// virtual location, so walkers can judge the entries beneath it by where
+// they really live.
+//
+// A folder the user cannot read but holds grants beneath is still opened,
+// for traversal only: callers filter what comes back entry by entry. Both
+// the named path and the real location must qualify, the same rule
+// resolveVP applies to links.
+func (f *FS) resolveForListVP(u *auth.User, vpath string) (real, realVP string, err error) {
 	vp := Clean(vpath)
-	if vp == "/" {
-		return f.realRoot, nil
+	if u == nil || u.Disabled || !u.HasAnyGrantUnder(vp) {
+		return "", "", ErrForbidden
 	}
-	real := filepath.Join(f.realRoot, filepath.FromSlash(strings.TrimPrefix(vp, "/")))
-	if !within(f.realRoot, real) {
-		return "", ErrNotExist
-	}
-	resolved, err := resolveExisting(real)
+	real, realVP, err = f.locate(vp)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "", ErrNotExist
-		}
-		return "", err
+		return "", "", err
 	}
-	if !within(f.realRoot, resolved) {
-		return "", ErrNotExist
+	if levelAt(u, vp, realVP) >= auth.AccessRead || passable(u, vp, realVP) {
+		return real, realVP, nil
 	}
-	return real, nil
+	return "", "", ErrNotExist
 }
 
 // Entry is one item in a directory listing.
@@ -259,7 +336,7 @@ type Entry struct {
 // that resolve outside the root are omitted too, so every entry returned is
 // genuinely openable.
 func (f *FS) List(u *auth.User, vpath string) ([]Entry, error) {
-	dir, err := f.ResolveForList(u, vpath)
+	dir, dirRealVP, err := f.resolveForListVP(u, vpath)
 	if err != nil {
 		return nil, err
 	}
@@ -297,24 +374,30 @@ func (f *FS) List(u *auth.User, vpath string) ([]Entry, error) {
 			continue // vanished between ReadDir and Info
 		}
 
+		childReal, _ := Join(dirRealVP, name)
 		// A symlink is the one entry type whose target can leave the root, so
 		// it has to be proven safe before it is advertised. Resolve does the
 		// same check on download; doing it here means the listing never
 		// contains a row that would 404 when tapped.
 		if info.Mode()&os.ModeSymlink != 0 {
 			resolved, rerr := resolveExisting(filepath.Join(dir, name))
-			if rerr != nil || !within(f.realRoot, resolved) {
-				continue // dangling, or points outside: hide it
+			if rerr != nil {
+				continue // dangling: hide it
 			}
+			rv, ok := f.virtualOf(resolved)
+			if !ok {
+				continue // points outside: hide it
+			}
+			childReal = rv
 			// Stat the target so a symlinked folder is shown as a folder.
 			if target, terr := os.Stat(resolved); terr == nil {
 				info = target
 			}
 		}
 
-		level := u.EffectiveLevel(child)
+		level := levelAt(u, child, childReal)
 		partial := false
-		if level == auth.AccessNone && info.IsDir() && u.HasAnyGrantUnder(child) {
+		if level == auth.AccessNone && info.IsDir() && passable(u, child, childReal) {
 			partial = true
 		}
 		if level == auth.AccessNone && !partial {
@@ -350,7 +433,8 @@ func (f *FS) List(u *auth.User, vpath string) ([]Entry, error) {
 
 // Info describes a single file, enforcing at least read access.
 func (f *FS) Info(u *auth.User, vpath string) (Entry, error) {
-	real, err := f.Resolve(u, vpath, auth.AccessRead)
+	vp := Clean(vpath)
+	real, realVP, err := f.resolveVP(u, vp, auth.AccessRead)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -365,19 +449,14 @@ func (f *FS) Info(u *auth.User, vpath string) (Entry, error) {
 		return Entry{}, err
 	}
 
-	name := filepath.Base(real)
-	child, err := Join(vpath, name)
-	if err != nil {
-		child = vpath
-	}
 	return Entry{
-		Name:    name,
-		Path:    child,
+		Name:    filepath.Base(real),
+		Path:    vp,
 		IsDir:   info.IsDir(),
 		Size:    info.Size(),
 		ModTime: info.ModTime(),
 		Mode:    info.Mode().String(),
-		Access:  u.EffectiveLevel(child).String(),
+		Access:  levelAt(u, vp, realVP).String(),
 	}, nil
 }
 

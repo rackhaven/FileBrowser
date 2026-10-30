@@ -393,6 +393,7 @@ button.ghost.danger, .drawer-item.danger { color: var(--danger); }
   font: inherit;
   font-size: 0.85rem;
 }
+.trash-erase:disabled { border-color: var(--border); color: var(--fg-muted); }
 
 /* Signed-in devices drawer: one row per live session of this account. */
 .sess-row {

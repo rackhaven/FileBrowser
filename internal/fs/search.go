@@ -52,14 +52,14 @@ func (f *FS) Search(u *auth.User, vpath, substr string) (SearchOut, error) {
 	}
 
 	vp := Clean(vpath)
-	startDir, err := f.ResolveForList(u, vp)
+	startDir, startRealVP, err := f.resolveForListVP(u, vp)
 	if err != nil {
 		return SearchOut{}, err
 	}
 
 	out := SearchOut{Entries: make([]Entry, 0, 32)}
-	var walk func(realDir, vDir string) error
-	walk = func(realDir, vDir string) error {
+	var walk func(realDir, vDir, realVDir string) error
+	walk = func(realDir, vDir, realVDir string) error {
 		des, err := os.ReadDir(realDir)
 		if err != nil {
 			// A folder the OS won't show (or that vanished mid-search)
@@ -83,14 +83,20 @@ func (f *FS) Search(u *auth.User, vpath, substr string) (SearchOut, error) {
 			if ierr != nil {
 				continue // vanished between ReadDir and Info
 			}
+			childReal, _ := Join(realVDir, name)
 
 			// A symlink must first prove it stays in the root, exactly as in
 			// List, or its row would 404 or, worse, offer outside content.
 			if info.Mode()&os.ModeSymlink != 0 {
 				resolved, rerr := resolveExisting(filepath.Join(realDir, name))
-				if rerr != nil || !within(f.realRoot, resolved) {
+				if rerr != nil {
 					continue
 				}
+				rv, ok := f.virtualOf(resolved)
+				if !ok {
+					continue
+				}
+				childReal = rv
 				if target, terr := os.Stat(resolved); terr == nil {
 					info = target
 				} else {
@@ -98,9 +104,11 @@ func (f *FS) Search(u *auth.User, vpath, substr string) (SearchOut, error) {
 				}
 			}
 
-			level := u.EffectiveLevel(childVP)
+			// Judged under both names, as in List: a link lends nothing
+			// its target does not already grant.
+			level := levelAt(u, childVP, childReal)
 			readable := level >= auth.AccessRead
-			partial := !readable && info.IsDir() && u.HasAnyGrantUnder(childVP)
+			partial := !readable && info.IsDir() && passable(u, childVP, childReal)
 			if !readable && !partial {
 				continue
 			}
@@ -123,7 +131,7 @@ func (f *FS) Search(u *auth.User, vpath, substr string) (SearchOut, error) {
 			}
 
 			if info.IsDir() {
-				if werr := walk(filepath.Join(realDir, name), childVP); werr != nil {
+				if werr := walk(filepath.Join(realDir, name), childVP, childReal); werr != nil {
 					return werr
 				}
 			}
@@ -131,7 +139,7 @@ func (f *FS) Search(u *auth.User, vpath, substr string) (SearchOut, error) {
 		return nil
 	}
 
-	if werr := walk(startDir, vp); werr != nil {
+	if werr := walk(startDir, vp, startRealVP); werr != nil {
 		return SearchOut{}, werr
 	}
 	return out, nil

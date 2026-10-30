@@ -155,12 +155,21 @@ Rules on a narrower path still let a user reach a deep folder: someone with
 only `/photos/private` can still open `/photos` to get there, they just see
 nothing else. The UI marks those intermediate folders so it is not confusing.
 
+A narrower rule also survives whatever happens to the folder around it. With
+the rules above, someone holding write on `/photos` still cannot delete,
+move or rename `/photos` itself, because that would carry `/photos/private`
+off with it; replacing a file needs write on that file, not just on its
+folder. Everything else in `/photos` stays theirs to change.
+
 **Deletes go to a trash, not off the disk.** Removing a file or folder moves it
 into a reserved `.trash` directory with a record of where it came from, who
 deleted it and when. **Menu → Deleted items** lists what you can act on:
 anything you deleted, or anything deleted from a folder you can write to, with
-**Restore** and **Erase** per item. Rescue a whole subtree later: restoring
-recreates any folders that went with it. Erasing every item at once is an
+**Restore** and **Erase** per item. Erase additionally needs write over
+everything the item held, so a folder an administrator deleted with a
+read-only rule inside it can be restored by its writers but only erased by
+an administrator. Rescue a whole subtree later: restoring recreates any
+folders that went with it. Erasing every item at once is an
 administrator action, and nothing in the trash survives being erased.
 
 **Deleted items age out.** By default entries leave the trash after 30 days
@@ -336,6 +345,14 @@ outright. Links inside the tree work when their target is written relative to
 the link, the form that survives the tree being anywhere; a link that names
 the root by its absolute location on disk cannot be followed, because the
 kernel re-anchors targets inside the root, and it opens as not found.
+
+**Links lend no access.** A symlink is followed only when the user could
+reach its target on their own: through a link, a user holds the weaker of
+their level where the link sits and their level where it points. A link in a
+shared folder that points into a folder the user has no rule for is hidden
+from their listings, searches, zips and copies, and opens as not found.
+Deleting or renaming a link moves the link itself, so only the folder it
+sits in matters.
 
 **No information leak through listings.** A folder the user cannot open is
 omitted from the listing entirely, rather than shown greyed out. Revealing that
@@ -522,7 +539,7 @@ noted.
 | `POST` | `/api/fs/rename` | `{from, to_dir, new_name, overwrite}`; an existing file refuses (409) unless `overwrite` is set, and directories are never replaced |
 | `POST` | `/api/fs/copy` | `{from, to_dir, name}`; a sibling duplicate. `to_dir` and `name` are optional: the copy then lands beside the source, under the name the UI proposes. An existing destination refuses (409), never replaced |
 | `POST` | `/api/fs/delete?path=/a.txt` | recursive for folders; the entry moves to the trash, see below |
-| `GET` | `/api/fs/trash` | deleted items the caller may act on, `{entries}` |
+| `GET` | `/api/fs/trash` | deleted items the caller may act on, `{entries}`; each says `can_restore` and `can_erase` |
 | `POST` | `/api/fs/restore` | `{name}`; put a trashed entry back where it came from |
 | `DELETE` | `/api/fs/trash?name=` | erase one trashed entry; with no `name`, admin-only wipe of the whole trash |
 | `GET` | `/api/fs/usage?path=/&depth=8` | `{files, dirs, bytes}` |

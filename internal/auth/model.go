@@ -170,6 +170,28 @@ func (u *User) HasAnyGrantUnder(p string) bool {
 	return false
 }
 
+// RestrictedBelow reports whether a grant strictly beneath p gives the user
+// less than level. Operations that act on a whole subtree at once (delete,
+// move, erase from the trash) consult it: holding write on a folder is not
+// write on a narrower read-only rule inside it, and carrying that folder off
+// would take the protected content with it.
+func (u *User) RestrictedBelow(p string, level AccessLevel) bool {
+	if u == nil {
+		return true
+	}
+	if u.Admin {
+		return false
+	}
+	p = normalizeVirtual(p)
+	for _, g := range u.Grants {
+		gp := normalizeVirtual(g.Path)
+		if gp != p && pathCovers(p, gp) && g.Level < level {
+			return true
+		}
+	}
+	return false
+}
+
 // PublicUser is the JSON shape sent to clients. It never contains the hash.
 type PublicUser struct {
 	ID                 string    `json:"id"`

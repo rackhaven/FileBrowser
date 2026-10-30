@@ -60,6 +60,9 @@ type TrashEntry struct {
 	DeletedAt    time.Time `json:"deleted_at"`
 	DeletedBy    string    `json:"deleted_by"`
 	CanRestore   bool      `json:"can_restore"`
+	// CanErase is CanRestore minus entries that took a stricter rule's
+	// content with them: those only an administrator may shred.
+	CanErase bool `json:"can_erase"`
 }
 
 // trashIDLen is the fixed width of a trash id in hex characters.
@@ -198,6 +201,7 @@ func (f *FS) TrashList(u *auth.User) ([]TrashEntry, error) {
 			continue
 		}
 		entry.CanRestore = admin || canRestore(u, meta.OriginalPath)
+		entry.CanErase = admin || canErase(u, meta.OriginalPath)
 		if !admin && !entry.CanRestore {
 			continue
 		}
@@ -232,6 +236,14 @@ func canRestore(u *auth.User, originalPath string) bool {
 		return true
 	}
 	return u.EffectiveLevel(Clean(originalPath)) >= auth.AccessWrite
+}
+
+// canErase reports whether the user may destroy the entry for good: restore
+// rights, plus write over everything that was beneath it. A folder an
+// administrator deleted can hold a read-only rule's content, which someone
+// with write on the folder alone must not be able to shred.
+func canErase(u *auth.User, originalPath string) bool {
+	return canRestore(u, originalPath) && !u.RestrictedBelow(Clean(originalPath), auth.AccessWrite)
 }
 
 // readTrashMeta loads .<id>.json; ok is false when the record is absent or
@@ -335,8 +347,11 @@ func (f *FS) restoreTarget(u *auth.User, originalPath string) (string, error) {
 	if isReservedName(path.Base(vp)) {
 		return "", ErrReserved
 	}
-	if !u.Admin && u.EffectiveLevel(parentDir(vp)) < auth.AccessWrite {
-		return "", ErrForbidden
+	// The destination folder is judged where it really lives, so a link
+	// on the way back cannot land the entry somewhere the user may not
+	// write.
+	if _, _, err := f.resolveVP(u, parentDir(vp), auth.AccessWrite); err != nil {
+		return "", err
 	}
 	dst := filepath.Join(f.realRoot, filepath.FromSlash(strings.TrimPrefix(vp, "/")))
 	if !within(f.realRoot, resolveFor(dst)) {
@@ -359,8 +374,8 @@ func parentDir(vp string) string {
 }
 
 // TrashDelete removes one trashed entry (and its record) forever. Restore
-// rights on the item are the gate: the same people who could restore it can
-// also shred it.
+// rights on the item are the gate, narrowed by canErase: write must also
+// reach every rule that was beneath the entry.
 func (f *FS) TrashDelete(u *auth.User, itemName string) error {
 	if u == nil || u.Disabled {
 		return ErrForbidden
@@ -377,7 +392,7 @@ func (f *FS) TrashDelete(u *auth.User, itemName string) error {
 	if !ok {
 		return ErrNotExist
 	}
-	if !u.Admin && !canRestore(u, meta.OriginalPath) {
+	if !u.Admin && !canErase(u, meta.OriginalPath) {
 		return ErrForbidden
 	}
 	if err := os.RemoveAll(filepath.Join(trash, item)); err != nil {
