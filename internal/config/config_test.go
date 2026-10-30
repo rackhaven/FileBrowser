@@ -54,6 +54,31 @@ func TestThumbCacheDefaultsBesideDataDir(t *testing.T) {
 	}
 }
 
+// TestSetDataDirCarriesDerivedThumbCache: the -data flag is applied after
+// Load, and a derived cache must follow it (the shipped systemd unit sets
+// the data dir only by flag).
+func TestSetDataDirCarriesDerivedThumbCache(t *testing.T) {
+	t.Setenv("FB_THUMB_CACHE", "")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.SetDataDir("/var/lib/filebrowser")
+	if cfg.ThumbCache != "/var/lib/filebrowser/thumbs" {
+		t.Errorf("ThumbCache = %q, want it moved with the data dir", cfg.ThumbCache)
+	}
+
+	t.Setenv("FB_THUMB_CACHE", "/srv/thumb-cache")
+	cfg, err = Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.SetDataDir("/var/lib/filebrowser")
+	if cfg.ThumbCache != "/srv/thumb-cache" {
+		t.Errorf("ThumbCache = %q, an explicit cache must stay put", cfg.ThumbCache)
+	}
+}
+
 func TestTrashTTLDefaultsAndOverrides(t *testing.T) {
 	// Default: thirty days, so the drawer is a safety net, not an archive.
 	cfg, err := Load("")

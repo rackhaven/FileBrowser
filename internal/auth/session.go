@@ -157,12 +157,16 @@ func (s *Sessions) saveLocked() error {
 	}
 	now := s.now()
 	records := make([]sessionRecord, 0, len(s.byToken))
-	for _, sess := range s.byToken {
+	// The map key is the token hash. It is written from the key rather than
+	// recomputed from sess.Token, because a session reloaded from this file
+	// never had its raw token: hashing that empty string gave every reloaded
+	// session the same dead hash, signing it out at the second restart.
+	for hash, sess := range s.byToken {
 		if now.After(sess.ExpiresAt) {
 			continue // expired rows do not earn their keep
 		}
 		records = append(records, sessionRecord{
-			TokenHash: sessionTokenHash(sess.Token),
+			TokenHash: hash,
 			UserID:    sess.UserID,
 			PublicID:  sess.PublicID,
 			Hint:      sess.Hint,

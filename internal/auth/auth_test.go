@@ -586,6 +586,31 @@ func TestSessionsPersistAcrossReopen(t *testing.T) {
 	}
 }
 
+// TestSessionsSurviveRepeatedRestarts: a session must outlive any number of
+// restarts, including saves made while it was a reloaded, tokenless row.
+func TestSessionsSurviveRepeatedRestarts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	s, err := OpenSessions(path, time.Hour)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	alice, _ := s.Start("alice")
+
+	for restart := 1; restart <= 3; restart++ {
+		s, err = OpenSessions(path, time.Hour)
+		if err != nil {
+			t.Fatalf("restart %d: %v", restart, err)
+		}
+		if s.Lookup(alice.Token) == nil {
+			t.Fatalf("alice signed out by restart %d", restart)
+		}
+		// Any sign-in rewrites the whole table, alice's reloaded row too.
+		if _, err := s.Start("bob"); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	}
+}
+
 func TestOpenSessionsPrunesAndRefusesCorruption(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sessions.json")
@@ -753,5 +778,58 @@ func TestRestrictedBelow(t *testing.T) {
 	}
 	if (&User{Admin: true, Grants: u.Grants}).RestrictedBelow("/", AccessWrite) {
 		t.Error("an administrator is never restricted")
+	}
+}
+
+// TestReadsSeeAnotherProcessesWrites: the CLI is a second process on the
+// same file. What it removes or resets must stop working on the running
+// server at its next read, not at the server's next write.
+func TestReadsSeeAnotherProcessesWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "users.json")
+	server, err := OpenStore(path)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	if _, err := server.Create("admin", "adminpassword", true, nil); err != nil {
+		t.Fatal(err)
+	}
+	bob, err := server.Create("bob", "oldpassword1", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	carol, err := server.Create("carol", "oldpassword2", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cli, err := OpenStore(path)
+	if err != nil {
+		t.Fatalf("second OpenStore: %v", err)
+	}
+	if err := cli.Delete(bob.ID); err != nil {
+		t.Fatalf("cli Delete: %v", err)
+	}
+	if err := cli.SetPassword(carol.ID, "newpassword2", true); err != nil {
+		t.Fatalf("cli SetPassword: %v", err)
+	}
+
+	if _, err := server.GetByUsername("bob"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("server still finds a user the CLI deleted: %v", err)
+	}
+	if _, err := server.Get(bob.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("server still finds the deleted user by id: %v", err)
+	}
+	got, err := server.Get(carol.ID)
+	if err != nil {
+		t.Fatalf("Get carol: %v", err)
+	}
+	if ok, _ := VerifyPassword("oldpassword2", got.PasswordHash); ok {
+		t.Error("the old password still verifies on the server")
+	}
+	if !got.MustChangePassword {
+		t.Error("the CLI reset's forced change did not reach the server")
+	}
+	if n := server.Count(); n != 2 {
+		t.Errorf("Count = %d, want 2", n)
 	}
 }

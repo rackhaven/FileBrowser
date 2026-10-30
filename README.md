@@ -294,9 +294,13 @@ filebrowser user list --data /var/lib/filebrowser   # or set FB_DATA_DIR
 Running these while the server is up is safe. Both processes coordinate
 through an advisory lock (`users.json.lock`) and the server re-reads the
 database before every change, so a CLI edit cannot interleave with, or be
-silently overwritten by, a live server's own write. The one exception is
-Windows, where the lock is a no-op: do CLI maintenance while the server
-is stopped.
+silently overwritten by, a live server's own write. The server also notices
+CLI edits on every request: a removed account is signed out at its next
+request, and after `user passwd` the old password stops working and any
+device still signed in can do nothing but choose a new one. The lock is only
+held while a change is written, never while the CLI waits for you to type.
+The one exception is Windows, where the lock is a no-op: do CLI maintenance
+while the server is stopped.
 
 ---
 
@@ -321,7 +325,7 @@ file.
 |                | `FB_TRASH_TTL`         | `720h`         | deleted items leave the trash after this; `0s` keeps them |
 |                | `FB_TRUST_PROXY_HEADERS` | `false`      | honour `X-Forwarded-Proto` and `X-Forwarded-For` |
 |                | `FB_MAX_UPLOAD_BYTES`  | `34359738368`  | largest upload, in bytes            |
-|                | `FB_THUMB_CACHE`       | `/data/thumbs` | where generated image previews live |
+|                | `FB_THUMB_CACHE`       | `<data>/thumbs` | where generated image previews live; follows `-data` unless set |
 |                | `FB_TLS_CERT`/`FB_TLS_KEY` | —         | terminate TLS here instead          |
 |                | `FB_LOG_LEVEL`         | `info`         | `debug`, `info`, `warn`, `error`    |
 |                | `FB_ADMIN_USER`        | `admin`        | first-run account name              |
