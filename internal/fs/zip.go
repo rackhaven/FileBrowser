@@ -37,12 +37,12 @@ import (
 // (or "files" for the root), so an extraction lands in its own directory
 // instead of spraying one folder's contents across the destination.
 //
-// Two entry types are deliberately skipped: in-flight upload temporaries, for
-// the same reason listings hide them, and every symlink, because a symlinked
-// file's content would be read through the link and the containment argument
-// is weaker there than for real files. A symlink inside the root is a listing
-// row that already passed Resolve-style verification; for a bulk archive the
-// conservative choice costs nothing.
+// In-flight upload temporaries are skipped, for the same reason listings hide
+// them. Symlinks are followed exactly when List would show them: they must
+// stay inside the root and the user must reach their target. Each real folder
+// is archived at most once, under the first name the walk meets it by, so a
+// link back up the tree (or two links to one folder) cannot make the walk
+// loop or multiply.
 //
 // The archive is written incrementally, so a folder of videos streams with
 // constant memory; total size is not known in advance and the caller must not
@@ -63,8 +63,13 @@ func (f *FS) Zip(u *auth.User, vpath string, w io.Writer) error {
 		return err
 	}
 
+	seen := make(map[string]bool)
 	var walk func(realDir, vDir, realVDir string, isTop bool) error
 	walk = func(realDir, vDir, realVDir string, isTop bool) error {
+		if seen[realVDir] {
+			return nil // reached again through a link: already archived
+		}
+		seen[realVDir] = true
 		des, err := os.ReadDir(realDir)
 		if err != nil {
 			if errors.Is(err, syscall.ENOTDIR) {
@@ -96,8 +101,8 @@ func (f *FS) Zip(u *auth.User, vpath string, w io.Writer) error {
 			childReal, _ := Join(realVDir, name)
 
 			if info.Mode()&os.ModeSymlink != 0 {
-				// Verify like List does, then ignore the symlink either way:
-				// its content is read through the link, which we do not do.
+				// Verify like List does: dangling and escaping links are left
+				// out, the rest are judged by where they lead.
 				resolved, rerr := resolveExisting(filepath.Join(realDir, name))
 				if rerr != nil {
 					continue

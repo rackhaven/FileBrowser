@@ -402,7 +402,10 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	}
 	// Counting is a walk of everything visible, so it takes a work slot
 	// like its siblings.
-	release := s.workSlot()
+	release, ok := s.workSlot(r)
+	if !ok {
+		return // the client left while queued
+	}
 	defer release()
 	usage, err := s.files.Usage(u, r.URL.Query().Get("path"), depth)
 	if err != nil {
@@ -421,7 +424,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	// A recursive search races whole subtrees; the work gate keeps a
 	// spirited typist from stacking an unbounded number of walks.
-	release := s.workSlot()
+	release, ok := s.workSlot(r)
+	if !ok {
+		return // the client left while queued
+	}
 	defer release()
 	found, err := s.files.Search(u, q.Get("path"), q.Get("q"))
 	if err != nil {
@@ -449,7 +455,10 @@ func (s *Server) handleThumb(w http.ResponseWriter, r *http.Request) {
 	// costs hundreds of megabytes of RAM per concurrent request, so the
 	// work gate bounds how many run at once. Cache hits pay the wait too,
 	// which is the honest bonus of a bounded queue: nobody skips it.
-	release := s.workSlot()
+	release, ok := s.workSlot(r)
+	if !ok {
+		return // the client left while queued
+	}
 	defer release()
 	thumb, err := s.files.Thumbnail(u, vpath)
 	if err != nil {
@@ -482,9 +491,14 @@ func (s *Server) handleZip(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
 	vpath := r.URL.Query().Get("path")
 
-	// Archive walking is whole-tree work, so it shares the bounded work
-	// gate before any bytes move.
-	release := s.workSlot()
+	// Archive walking is whole-tree work, so it takes a bulk slot before
+	// any bytes move. The slot is held for the whole stream, which is why
+	// the stream is stall-guarded below: a client that stops reading gives
+	// it back within stallLimit.
+	release, ok := s.bulkSlot(r)
+	if !ok {
+		return // the client left while queued
+	}
 	defer release()
 	name, err := s.files.ZipInfo(u, vpath)
 	if err != nil {
@@ -498,7 +512,9 @@ func (s *Server) handleZip(w http.ResponseWriter, r *http.Request) {
 	// request walks afresh so renames and deletes are reflected immediately.
 	w.Header().Set("Cache-Control", "private, no-store")
 
-	if err := s.files.Zip(u, vpath, w); err != nil {
+	guard := newStallGuard(w)
+	defer guard.done()
+	if err := s.files.Zip(u, vpath, guard); err != nil {
 		// Headers may already be committed, so the only useful move is to cut
 		// the stream rather than append a JSON error to a binary body.
 		s.logError("zip failed", "path", fs.Clean(vpath), "err", err)
@@ -637,9 +653,12 @@ func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request) {
 		req.ToDir = path.Dir(fs.Clean(req.From))
 	}
 
-	// Duplicating a folder is whole-tree streaming work; it queues behind
-	// the other heavy handlers.
-	release := s.workSlot()
+	// Duplicating a folder is whole-tree streaming work; it queues with the
+	// other bulk jobs, never in front of a thumbnail.
+	release, ok := s.bulkSlot(r)
+	if !ok {
+		return // the client left while queued
+	}
 	defer release()
 	entry, err := s.files.Copy(u, req.From, req.ToDir, req.Name)
 	if err != nil {

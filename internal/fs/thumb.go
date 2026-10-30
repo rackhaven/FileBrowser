@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
 	"image/jpeg"
 	"io"
 	"os"
@@ -45,6 +46,19 @@ import (
 // One fixed size keeps the cache, the ETags and the interface simple; a
 // picture shrunk to 320 pixels is plenty for a list row on any screen.
 const ThumbSize = 320
+
+// thumbDecodeBudget caps the memory one full decode may take, estimated from
+// the header before any pixel is read. A PNG of one flat colour compresses a
+// 30000x30000 canvas into a few kilobytes and would decode into gigabytes;
+// anything over budget keeps its icon instead. 256 MiB still covers a 48 MP
+// phone photo with room to spare.
+const thumbDecodeBudget = 256 << 20
+
+// thumbPassThroughMax bounds the original bytes served as their own preview.
+// A header claiming 1x1 says nothing about what follows it, so a small
+// image is passed through only when the file is small too; anything larger
+// is decoded and re-encoded, which reads no further than the image itself.
+const thumbPassThroughMax = 4 << 20
 
 // ErrNotImage says the named file is not an image this build can preview
 // (neither by extension nor by content).
@@ -140,14 +154,18 @@ func (f *FS) Thumbnail(u *auth.User, vpath string) (Thumb, error) {
 		// image", not as a 500.
 		return Thumb{}, addNotImage(derr)
 	}
-	if cfg.Width <= ThumbSize && cfg.Height <= ThumbSize {
+	if decodeCost(cfg) > thumbDecodeBudget {
+		return Thumb{}, fmt.Errorf("%w (%dx%d is too large to preview)", ErrNotImage, cfg.Width, cfg.Height)
+	}
+	if cfg.Width <= ThumbSize && cfg.Height <= ThumbSize && info.Size() <= thumbPassThroughMax {
 		// Already small: the original is its own best preview. Passing the
-		// bytes straight through avoids a pointless re-encode.
+		// bytes straight through avoids a pointless re-encode. The limit
+		// holds even if the file grew since the stat.
 		fh, oerr := openInside(f.realRoot, relFromVP(vp), os.O_RDONLY, 0)
 		if oerr != nil {
 			return Thumb{}, oerr
 		}
-		raw, rerr := io.ReadAll(fh)
+		raw, rerr := io.ReadAll(io.LimitReader(fh, thumbPassThroughMax))
 		cerr := fh.Close()
 		if rerr != nil {
 			return Thumb{}, rerr
@@ -175,6 +193,40 @@ func (f *FS) Thumbnail(u *auth.User, vpath string) (Thumb, error) {
 		_ = os.WriteFile(cachePath, data, 0o600)
 	}
 	return Thumb{Data: data, ContentType: "image/jpeg", ModTime: info.ModTime()}, nil
+}
+
+// decodeCost estimates the bytes a full decode of an image with this header
+// allocates, from its dimensions and the pixel layout its decoder produces.
+// The comparison is arranged so no product can overflow, whatever the
+// header claims.
+func decodeCost(cfg image.Config) int64 {
+	w, h, bpp := int64(cfg.Width), int64(cfg.Height), bytesPerPixel(cfg.ColorModel)
+	if w <= 0 || h <= 0 {
+		return 0
+	}
+	if w > thumbDecodeBudget/(h*bpp) {
+		return thumbDecodeBudget + 1
+	}
+	return w * h * bpp
+}
+
+// bytesPerPixel is the in-memory width of one decoded pixel. Unknown models
+// count as four bytes, the common RGBA case.
+func bytesPerPixel(m color.Model) int64 {
+	if _, ok := m.(color.Palette); ok {
+		return 1
+	}
+	switch m {
+	case color.GrayModel, color.AlphaModel:
+		return 1
+	case color.Gray16Model, color.Alpha16Model:
+		return 2
+	case color.YCbCrModel:
+		return 3 // 4:4:4 is the worst case; subsampled JPEGs take less
+	case color.RGBA64Model, color.NRGBA64Model:
+		return 8
+	}
+	return 4
 }
 
 // thumbCachePath is the cache file for one exact version of a file. Identity

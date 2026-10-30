@@ -45,6 +45,7 @@ import (
 
 type harness struct {
 	t      *testing.T
+	srv    *Server
 	server *httptest.Server
 	users  *auth.Store
 	root   string
@@ -97,6 +98,7 @@ func newHarnessWithConfig(t *testing.T, cfg Config) *harness {
 
 	return &harness{
 		t:      t,
+		srv:    srv,
 		server: ts,
 		users:  users,
 		root:   root,

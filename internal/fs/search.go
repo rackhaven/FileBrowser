@@ -41,6 +41,8 @@ type SearchOut struct {
 // insensitively, with the visibility rules of List: readable files only,
 // pass-through folders entered for what lies beneath, upload temporaries
 // hidden, and symlinks verified the same way before their row is offered.
+// Like Zip, each real folder is walked at most once, so a link back up the
+// tree cannot turn a search into an endless walk.
 //
 // The match set is bounded by SearchLimit, so the cost is roughly the cost of
 // walking the visible tree, not of streaming it; Usage already makes the same
@@ -59,7 +61,12 @@ func (f *FS) Search(u *auth.User, vpath, substr string) (SearchOut, error) {
 
 	out := SearchOut{Entries: make([]Entry, 0, 32)}
 	var walk func(realDir, vDir, realVDir string) error
+	seen := make(map[string]bool)
 	walk = func(realDir, vDir, realVDir string) error {
+		if seen[realVDir] {
+			return nil // reached again through a link: already searched
+		}
+		seen[realVDir] = true
 		des, err := os.ReadDir(realDir)
 		if err != nil {
 			// A folder the OS won't show (or that vanished mid-search)
