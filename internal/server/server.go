@@ -18,6 +18,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"io"
 	stdfs "io/fs"
 	"log/slog"
 	"net"
@@ -448,6 +449,22 @@ func (s *statusRecorder) Flush() {
 }
 
 func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
+// ReadFrom keeps downloads zero-copy. http.ServeContent copies a file into
+// the response with io.CopyN, which uses the writer's ReadFrom when it has
+// one; net/http's own writer answers that with sendfile(2), so file bytes
+// go from the page cache to the socket without passing through the process.
+// Without this method the wrapper hid that path, and every download took a
+// 32 KiB userspace copy loop instead: on a 2 GiB loopback download, about
+// twice the CPU. Over TLS terminated here the bytes must be encrypted in
+// the process anyway, and net/http falls back to copying by itself.
+func (s *statusRecorder) ReadFrom(r io.Reader) (int64, error) {
+	s.written = true
+	if rf, ok := s.ResponseWriter.(io.ReaderFrom); ok {
+		return rf.ReadFrom(r)
+	}
+	return io.Copy(s.ResponseWriter, r)
+}
 
 // clientIP returns the peer address. X-Forwarded-For is deliberately ignored
 // for rate limiting, since it is attacker-controlled unless a proxy overwrites

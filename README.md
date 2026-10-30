@@ -453,6 +453,11 @@ Consequences worth knowing:
 - Resuming an interrupted large download works, because the server supports
   `Range` requests (`206 Partial Content`).
 - The browser owns the download, so its own UI shows progress and retry.
+- Over plain HTTP (behind Caddy or `tailscale serve`), file bytes go from
+  the disk cache to the network with `sendfile(2)`, never passing through
+  the server process; on a small board that is most of the CPU a download
+  would otherwise cost. With TLS terminated by this server, the bytes have
+  to be encrypted in the process, so this does not apply there.
 - Images and PDFs open inline instead of downloading, since the browser can
   display them.
 - A whole folder can come down as one zip: use "Download this folder as zip"
