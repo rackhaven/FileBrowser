@@ -726,3 +726,32 @@ func TestSyncReplaceMovesData(t *testing.T) {
 		t.Errorf("second target holds %q", raw)
 	}
 }
+
+// TestRestrictedBelow: only grants strictly beneath the path count, matched
+// on whole segments, and administrators are never restricted.
+func TestRestrictedBelow(t *testing.T) {
+	u := &User{Grants: []Grant{
+		{Path: "/photos", Level: AccessWrite},
+		{Path: "/photos/private", Level: AccessRead},
+		{Path: "/photos-archive/x", Level: AccessRead},
+	}}
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"/photos", true},
+		{"/", true},
+		{"/photos/private", false}, // its own rule is not beneath it
+		{"/photos/other", false},
+		{"/photos-archive", true},
+		{"/photos/private/deeper", false},
+	}
+	for _, c := range cases {
+		if got := u.RestrictedBelow(c.path, AccessWrite); got != c.want {
+			t.Errorf("RestrictedBelow(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+	if (&User{Admin: true, Grants: u.Grants}).RestrictedBelow("/", AccessWrite) {
+		t.Error("an administrator is never restricted")
+	}
+}

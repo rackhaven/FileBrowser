@@ -112,7 +112,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		"path":      fs.Clean(vpath),
 		"parent":    parentOf(fs.Clean(vpath), u),
 		"entries":   page,
-		"can_write": u.EffectiveLevel(fs.Clean(vpath)) >= auth.AccessWrite,
+		"can_write": s.files.Level(u, vpath) >= auth.AccessWrite,
 		"total":     total,
 		"more":      more,
 	})

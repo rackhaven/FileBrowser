@@ -102,36 +102,60 @@ func (f *FS) UploadTarget(u *auth.User, dir, name string, overwrite bool) (real,
 		if !overwrite {
 			return "", "", fmt.Errorf("fs: %s already exists: %w", name, os.ErrExist)
 		}
+		// Replacing is writing to the existing file, not only to its folder:
+		// a read-only rule on the file itself must hold.
+		if _, _, err := f.resolveEntry(u, vpath, auth.AccessWrite); err != nil {
+			return "", "", err
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", "", err
 	}
 	return target, vpath, nil
 }
 
+// subtreeWritable reports whether the user may carry off everything at and
+// beneath an entry known by these virtual paths (its name, and where it
+// really lives). Write on a folder does not reach a stricter rule inside it.
+func subtreeWritable(u *auth.User, vps ...string) bool {
+	for _, vp := range vps {
+		if u.RestrictedBelow(vp, auth.AccessWrite) {
+			return false
+		}
+	}
+	return true
+}
+
 // Remove deletes a file or (recursively) a directory: really, it moves the
 // entry into the reserved .trash directory with a record of where it came
 // from, so accidental deletes are undoable (see RestoreTrash). Write access
-// on the entry itself is required.
+// on the entry itself is required, and on everything beneath it: a folder
+// holding a read-only rule cannot be deleted by someone that rule protects
+// against.
 func (f *FS) Remove(u *auth.User, vpath string) error {
 	vp := Clean(vpath)
 	if isReservedName(path.Base(vp)) {
 		return ErrReserved
 	}
-	real, err := f.Resolve(u, vp, auth.AccessWrite)
+	real, realVP, err := f.resolveEntry(u, vp, auth.AccessWrite)
 	if err != nil {
 		return err
 	}
 	if real == f.realRoot {
 		return fmt.Errorf("fs: refusing to delete the root directory")
 	}
+	if !subtreeWritable(u, vp, realVP) {
+		return ErrForbidden
+	}
 	return f.moveToTrash(u, real, vp)
 }
 
 // Rename moves an entry. Write access is required on both the source and the
 // destination directory so a read-only user cannot shuffle files they cannot
-// even see. Unless overwrite is true, a destination that already exists is
-// refused with a typed existence error instead of being devoured; the move
-// confirms only what the caller asked to replace.
+// even see. Moving a folder also needs write on everything beneath it, since
+// rules are bound to paths: a read-only rule inside would no longer match
+// once the folder had a new name. Unless overwrite is true, a destination
+// that already exists is refused with a typed existence error instead of
+// being devoured; the move confirms only what the caller asked to replace.
 func (f *FS) Rename(u *auth.User, from, toDir, newName string, overwrite bool) (Entry, error) {
 	fromVP := Clean(from)
 	if isReservedName(path.Base(fromVP)) {
@@ -140,12 +164,15 @@ func (f *FS) Rename(u *auth.User, from, toDir, newName string, overwrite bool) (
 	if isReservedName(newName) {
 		return Entry{}, ErrReserved
 	}
-	src, err := f.Resolve(u, fromVP, auth.AccessWrite)
+	src, srcRealVP, err := f.resolveEntry(u, fromVP, auth.AccessWrite)
 	if err != nil {
 		return Entry{}, err
 	}
 	if src == f.realRoot {
 		return Entry{}, fmt.Errorf("fs: refusing to move the root directory")
+	}
+	if !subtreeWritable(u, fromVP, srcRealVP) {
+		return Entry{}, ErrForbidden
 	}
 
 	dstVP, err := Join(toDir, newName)
@@ -166,6 +193,10 @@ func (f *FS) Rename(u *auth.User, from, toDir, newName string, overwrite bool) (
 			// replaces files on the ground, so without this check the
 			// default answer to a name collision would be deletion.
 			return Entry{}, fmt.Errorf("fs: %s already exists: %w", newName, os.ErrExist)
+		}
+		// The file being replaced needs write of its own, as for uploads.
+		if _, _, err := f.resolveEntry(u, dstVP, auth.AccessWrite); err != nil {
+			return Entry{}, err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return Entry{}, err
@@ -356,7 +387,7 @@ func (f *FS) Copy(u *auth.User, from, toDir, name string) (Entry, error) {
 		if merr != nil {
 			return Entry{}, merr
 		}
-		if err := f.copyWalk(srcReal, tmp); err != nil {
+		if err := f.copyWalk(u, srcReal, tmp); err != nil {
 			os.RemoveAll(tmp)
 			return Entry{}, err
 		}
@@ -432,7 +463,7 @@ func (f *FS) copyFileInto(dst *os.File, rel string, info os.FileInfo) error {
 
 // copyWalk mirrors src into dst: same names, same regular-file bytes, dir
 // modes carried over, reserved names and folder symlinks left out.
-func (f *FS) copyWalk(srcDir, dstDir string) error {
+func (f *FS) copyWalk(u *auth.User, srcDir, dstDir string) error {
 	des, err := os.ReadDir(srcDir)
 	if err != nil {
 		return err
@@ -451,7 +482,13 @@ func (f *FS) copyWalk(srcDir, dstDir string) error {
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			resolved, rerr := resolveExisting(srcPath)
-			if rerr != nil || !within(f.realRoot, resolved) {
+			if rerr != nil {
+				continue
+			}
+			// A link to a place the user cannot read is hidden from their
+			// listings, so its content does not ride along in a copy either.
+			rv, ok := f.virtualOf(resolved)
+			if !ok || u.EffectiveLevel(rv) < auth.AccessRead {
 				continue // invisible to listings, invisible to copies
 			}
 			target, terr := os.Stat(resolved)
@@ -485,7 +522,7 @@ func (f *FS) copyWalk(srcDir, dstDir string) error {
 			if err := os.MkdirAll(dstPath, info.Mode()&0o777); err != nil {
 				return err
 			}
-			if err := f.copyWalk(srcPath, dstPath); err != nil {
+			if err := f.copyWalk(u, srcPath, dstPath); err != nil {
 				return err
 			}
 			continue

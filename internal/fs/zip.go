@@ -49,7 +49,7 @@ import (
 // set Content-Length.
 func (f *FS) Zip(u *auth.User, vpath string, w io.Writer) error {
 	vp := Clean(vpath)
-	startDir, err := f.ResolveForList(u, vp)
+	startDir, startRealVP, err := f.resolveForListVP(u, vp)
 	if err != nil {
 		return err
 	}
@@ -63,8 +63,8 @@ func (f *FS) Zip(u *auth.User, vpath string, w io.Writer) error {
 		return err
 	}
 
-	var walk func(realDir, vDir string, isTop bool) error
-	walk = func(realDir, vDir string, isTop bool) error {
+	var walk func(realDir, vDir, realVDir string, isTop bool) error
+	walk = func(realDir, vDir, realVDir string, isTop bool) error {
 		des, err := os.ReadDir(realDir)
 		if err != nil {
 			if errors.Is(err, syscall.ENOTDIR) {
@@ -93,14 +93,20 @@ func (f *FS) Zip(u *auth.User, vpath string, w io.Writer) error {
 			if ierr != nil {
 				continue // vanished between ReadDir and Info
 			}
+			childReal, _ := Join(realVDir, name)
 
 			if info.Mode()&os.ModeSymlink != 0 {
 				// Verify like List does, then ignore the symlink either way:
 				// its content is read through the link, which we do not do.
 				resolved, rerr := resolveExisting(filepath.Join(realDir, name))
-				if rerr != nil || !within(f.realRoot, resolved) {
+				if rerr != nil {
 					continue
 				}
+				rv, ok := f.virtualOf(resolved)
+				if !ok {
+					continue
+				}
+				childReal = rv
 				if target, terr := os.Stat(resolved); terr == nil {
 					info = target
 				} else {
@@ -110,9 +116,11 @@ func (f *FS) Zip(u *auth.User, vpath string, w io.Writer) error {
 
 			// Mirror List's visibility: files need read; folders the user can
 			// only pass through (partial) are entered for what lies beneath.
-			level := u.EffectiveLevel(childVP)
+			// Judged under both names, as in List: a link lends nothing
+			// its target does not already grant.
+			level := levelAt(u, childVP, childReal)
 			readable := level >= auth.AccessRead
-			partial := !readable && info.IsDir() && u.HasAnyGrantUnder(childVP)
+			partial := !readable && info.IsDir() && passable(u, childVP, childReal)
 			if !readable && !partial {
 				continue
 			}
@@ -120,7 +128,7 @@ func (f *FS) Zip(u *auth.User, vpath string, w io.Writer) error {
 			rel := startName + "/" + relUnder(vpath, childVP)
 
 			if info.IsDir() {
-				if werr := walk(filepath.Join(realDir, name), childVP, false); werr != nil {
+				if werr := walk(filepath.Join(realDir, name), childVP, childReal, false); werr != nil {
 					return werr
 				}
 				continue
@@ -168,7 +176,7 @@ func (f *FS) Zip(u *auth.User, vpath string, w io.Writer) error {
 		return nil
 	}
 
-	if werr := walk(startDir, Clean(vpath), true); werr != nil {
+	if werr := walk(startDir, Clean(vpath), startRealVP, true); werr != nil {
 		return stop(werr)
 	}
 	return zw.Close()

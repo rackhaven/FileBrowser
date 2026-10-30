@@ -641,6 +641,8 @@ function trashRow(entry) {
   const shred = document.createElement('button');
   shred.className = 'trash-erase';
   shred.textContent = 'Erase';
+  // An older server sends no can_erase; let it answer for itself.
+  shred.disabled = entry.can_erase === false;
   shred.addEventListener('click', async () => {
     if (!await confirmSheet(`Erase ${entry.original_path || entry.name} for good?`,
       'This is not the trash: the bytes leave the disk.', 'Erase')) return;
