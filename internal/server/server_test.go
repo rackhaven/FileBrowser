@@ -44,7 +44,7 @@ import (
 // ------------------------------------------------------------ harness -----
 
 type harness struct {
-	t      *testing.T
+	t      testing.TB
 	srv    *Server
 	server *httptest.Server
 	users  *auth.Store
@@ -53,13 +53,13 @@ type harness struct {
 }
 
 // newHarness builds a live server over a temporary root.
-func newHarness(t *testing.T) *harness {
+func newHarness(t testing.TB) *harness {
 	return newHarnessWithConfig(t, Config{SessionTTL: time.Hour})
 }
 
 // newHarnessWithConfig is newHarness with a chosen server Config, so tests
 // can exercise proxy trust and other toggles.
-func newHarnessWithConfig(t *testing.T, cfg Config) *harness {
+func newHarnessWithConfig(t testing.TB, cfg Config) *harness {
 	t.Helper()
 
 	root := t.TempDir()
@@ -118,14 +118,14 @@ func testAssets() fstest.MapFS {
 	}
 }
 
-func mkdir(t *testing.T, root, rel string) {
+func mkdir(t testing.TB, root, rel string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(rel)), 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", rel, err)
 	}
 }
 
-func write(t *testing.T, root, rel, content string) {
+func write(t testing.TB, root, rel, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(rel)), []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", rel, err)
