@@ -140,7 +140,7 @@ func runServe(args []string) error {
 		cfg.Root = filepath.Clean(*root)
 	}
 	if *dataDir != "" {
-		cfg.DataDir = filepath.Clean(*dataDir)
+		cfg.SetDataDir(*dataDir)
 	}
 	if *trashTTL != "" {
 		d, err := time.ParseDuration(*trashTTL)
@@ -401,13 +401,11 @@ func runUser(args []string) error {
 	if err != nil {
 		return err
 	}
-	// Hold the advisory lock for the whole command: the server coordinates
-	// through the same lock file, so an edit cannot interleave with (or be
-	// overwritten by) a live server's own write.
-	if err := store.LockExclusive(); err != nil {
-		return err
-	}
-	defer func() { _ = store.Unlock() }()
+	// No lock is held across the command: every store mutation takes the
+	// cross-process lock for itself and re-reads the file first, and Create
+	// re-checks the username under it. Holding the lock here would also hold
+	// it through the password prompt, stalling a live server's user edits
+	// for as long as someone takes to type.
 
 	switch cmd {
 	case "add":

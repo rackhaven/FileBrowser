@@ -66,6 +66,10 @@ type Config struct {
 	// means info. Operational, not correctness-relevant, but a typo should
 	// still be a config error rather than silence.
 	LogLevel string `yaml:"log_level"`
+
+	// thumbDerived records that ThumbCache was not given but derived from
+	// DataDir, so SetDataDir knows to carry it along.
+	thumbDerived bool
 	// AllowSignup is intentionally not supported: accounts are created by an
 	// admin so the service can never be self-serve on a public network.
 }
@@ -184,8 +188,20 @@ func Load(path string) (Config, error) {
 	// a user might mistake for content.
 	if cfg.ThumbCache == "" {
 		cfg.ThumbCache = filepath.Join(cfg.DataDir, "thumbs")
+		cfg.thumbDerived = true
 	}
 	return cfg, nil
+}
+
+// SetDataDir moves the data directory after Load, as the -data flag does.
+// A preview cache that was only ever derived from the data directory moves
+// with it; one configured explicitly stays where it was put. Assigning
+// DataDir directly would leave the cache pointing into the old directory.
+func (c *Config) SetDataDir(dir string) {
+	c.DataDir = filepath.Clean(dir)
+	if c.thumbDerived {
+		c.ThumbCache = filepath.Join(c.DataDir, "thumbs")
+	}
 }
 
 func envStr(key string, dst *string) {

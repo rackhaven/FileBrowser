@@ -48,8 +48,10 @@ type database struct {
 // (`filebrowser user ...`). They coordinate through an advisory lock on
 // users.json.lock, and every mutation first re-reads the file when it changed
 // underneath us, so a CLI password reset cannot be silently overwritten by
-// the server's next save. The lock file is separate because users.json itself
-// is replaced on every write, which would strand a lock on a dead inode.
+// the server's next save. Reads refresh the same way, so an account the CLI
+// removes or resets stops working on a running server at its next request.
+// The lock file is separate because users.json itself is replaced on every
+// write, which would strand a lock on a dead inode.
 type Store struct {
 	mu   sync.RWMutex
 	path string
@@ -57,11 +59,10 @@ type Store struct {
 	// taken on it lives with the open file description, so a crashed process
 	// never strands the lock.
 	lockFile *os.File
-	// lastSize and lastMod describe the copy of the database this process
-	// last read or wrote, for change detection.
-	lastSize int64
-	lastMod  time.Time
-	db       database
+	// last describes the copy of the database this process last read or
+	// wrote, for change detection; nil when there was no file.
+	last os.FileInfo
+	db   database
 }
 
 const dbVersion = 1
@@ -120,11 +121,19 @@ func (s *Store) noteStat() {
 func (s *Store) noteStatLocked() {
 	info, err := os.Stat(s.path)
 	if err != nil {
-		s.lastSize, s.lastMod = 0, time.Time{}
+		s.last = nil
 		return
 	}
-	s.lastSize = info.Size()
-	s.lastMod = info.ModTime()
+	s.last = info
+}
+
+// unchangedLocked reports whether info describes the copy last seen. Every
+// save replaces the file by rename, so a new file is a new inode: SameFile
+// catches a rewrite even when size and mtime match, as two password hashes
+// of equal length written within one coarse mtime tick would.
+func (s *Store) unchangedLocked(info os.FileInfo) bool {
+	return s.last != nil && os.SameFile(info, s.last) &&
+		info.Size() == s.last.Size() && info.ModTime().Equal(s.last.ModTime())
 }
 
 // reloadIfChanged replaces the in-memory database when another process wrote
@@ -146,7 +155,7 @@ func (s *Store) reloadIfChanged() error {
 		return fmt.Errorf("auth: stat %s: %w", s.path, err)
 	}
 	s.mu.RLock()
-	unchanged := info.Size() == s.lastSize && info.ModTime().Equal(s.lastMod)
+	unchanged := s.unchangedLocked(info)
 	s.mu.RUnlock()
 	if unchanged {
 		return nil
@@ -155,7 +164,7 @@ func (s *Store) reloadIfChanged() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Double-check: the file may have changed again while we waited.
-	if info.Size() == s.lastSize && info.ModTime().Equal(s.lastMod) {
+	if s.unchangedLocked(info) {
 		return nil
 	}
 	raw, rerr := os.ReadFile(s.path)
@@ -201,22 +210,14 @@ func (s *Store) withFileLock(op func() error) error {
 	return nil
 }
 
-// LockExclusive takes the cross-process lock for the caller's whole command.
-// The CLI uses this so `user add` performs its check-then-create pair inside
-// one locked window. Lock changes made by other processes are read in.
-func (s *Store) LockExclusive() error {
-	if err := s.lockEx(); err != nil {
-		return fmt.Errorf("auth: lock %s: %w", s.path, err)
-	}
-	if err := s.reloadIfChanged(); err != nil {
-		_ = s.lockUn()
-		return err
-	}
-	return nil
+// refresh pulls in another process's writes before a read. It takes no
+// cross-process lock: saves land by atomic rename, so the file is always
+// one complete version or the next. A file that cannot be read or parsed
+// leaves the last good copy in service rather than locking everyone out;
+// the next mutation, which does report errors, will surface it.
+func (s *Store) refresh() {
+	_ = s.reloadIfChanged()
 }
-
-// Unlock releases the cross-process lock taken by LockExclusive.
-func (s *Store) Unlock() error { return s.lockUn() }
 
 // save writes the database atomically. Callers must hold s.mu.
 func (s *Store) save() error {
@@ -258,6 +259,7 @@ func ValidPassword(p string) bool { return len(p) >= 8 }
 
 // List returns every user, sorted by username.
 func (s *Store) List() []*User {
+	s.refresh()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -281,6 +283,7 @@ func sortByUsername(users []*User) {
 
 // Get returns a user by ID.
 func (s *Store) Get(id string) (*User, error) {
+	s.refresh()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, u := range s.db.Users {
@@ -296,6 +299,7 @@ func (s *Store) Get(id string) (*User, error) {
 // GetByUsername returns a user by their lowercased username.
 func (s *Store) GetByUsername(name string) (*User, error) {
 	name = strings.ToLower(strings.TrimSpace(name))
+	s.refresh()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, u := range s.db.Users {
@@ -310,6 +314,7 @@ func (s *Store) GetByUsername(name string) (*User, error) {
 
 // Count reports the number of stored accounts.
 func (s *Store) Count() int {
+	s.refresh()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.db.Users)
