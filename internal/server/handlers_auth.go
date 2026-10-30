@@ -60,10 +60,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if !s.allowLogin(w) {
+	if !s.allowHash(w) {
 		return
 	}
-	defer func() { <-s.loginGate }()
+	defer func() { <-s.hashGate }()
 	req.Username = strings.TrimSpace(req.Username)
 
 	user, err := s.users.GetByUsername(req.Username)
@@ -135,14 +135,28 @@ type changePasswordRequest struct {
 
 // handleChangePassword lets a user rotate their own password. Every other
 // session for that account is revoked, so a stolen cookie dies with the change.
+//
+// Verifying the current password is a full argon2id hash, so it takes a hash
+// slot like sign-in does, and attempts are throttled per account: a stolen
+// cookie must not become an unthrottled oracle for the password behind it.
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
+	throttle := "password:" + u.ID
+	if !s.limiter.allow(throttle) {
+		w.Header().Set("Retry-After", "900")
+		writeError(w, http.StatusTooManyRequests, "too many attempts, try again later")
+		return
+	}
 
 	var req changePasswordRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if !s.allowHash(w) {
+		return
+	}
+	defer func() { <-s.hashGate }()
 
 	ok, err := auth.VerifyPassword(req.CurrentPassword, u.PasswordHash)
 	if err != nil || !ok {
@@ -172,6 +186,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		s.setSessionCookie(w, r, newSess.Token, newSess.ExpiresAt)
 	}
 
+	s.limiter.reset(throttle)
 	s.logf("password changed", "user", u.Username)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

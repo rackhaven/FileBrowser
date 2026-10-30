@@ -71,16 +71,21 @@ type Server struct {
 	files    *fs.FS
 	static   stdfs.FS
 	limiter  *rateLimiter
-	// loginGate bounds concurrent password hashing on the unauthenticated
-	// login path, so the per-attempt memory cost of argon2id is capped no
-	// matter how many source addresses arrive at once.
-	loginGate chan struct{}
-	// workGate bounds concurrent heavy handler work: decodes of large
-	// images, whole-tree walks for zip, search, usage and copies. Without
-	// it, N authenticated requests in parallel cost N times the worst
-	// handler's peak memory, which is how a bored user takes a server to
-	// its knees without ever touching upload or login.
-	workGate  chan struct{}
+	// hashGate bounds concurrent password hashing: sign-in, password
+	// changes, and the admin and bootstrap paths that set one. Each hash
+	// costs 64 MiB of argon2id memory, so the gate caps that cost no matter
+	// how many requests arrive at once, signed in or not.
+	hashGate chan struct{}
+	// workGate bounds concurrent heavy interactive work: image decodes,
+	// search and usage walks. Without it, N authenticated requests in
+	// parallel cost N times the worst handler's peak memory, which is how a
+	// bored user takes a server to its knees without ever touching upload
+	// or login.
+	workGate chan struct{}
+	// bulkGate is workGate for jobs measured in minutes rather than
+	// milliseconds: zip streams and copies. Kept apart so a few large
+	// archives on slow connections never queue a thumbnail behind them.
+	bulkGate  chan struct{}
 	started   time.Time
 	version   string
 	log       *slog.Logger
@@ -127,8 +132,9 @@ func New(opt Options) *Server {
 		files:     opt.FS,
 		static:    opt.Static,
 		limiter:   newRateLimiter(8, 15*time.Minute),
-		loginGate: make(chan struct{}, 4),
+		hashGate:  make(chan struct{}, 4),
 		workGate:  make(chan struct{}, 4),
+		bulkGate:  make(chan struct{}, 4),
 		started:   time.Now(),
 		version:   opt.Version,
 		log:       logger,
@@ -144,11 +150,26 @@ func (s *Server) logError(msg string, args ...any) {
 	s.log.Error(msg, args...)
 }
 
-// workSlot takes one of the few heavy-work slots, blocking until a slot
-// frees. It returns the release function; handlers defer it.
-func (s *Server) workSlot() func() {
-	s.workGate <- struct{}{}
-	return func() { <-s.workGate }
+// workSlot takes one of the few heavy-work slots, waiting until one frees.
+// It returns the release function, which handlers defer, and false when the
+// client went away first: there is nobody left to answer, and a request
+// that is no longer wanted must not keep its place in the queue.
+func (s *Server) workSlot(r *http.Request) (func(), bool) {
+	return takeSlot(r, s.workGate)
+}
+
+// bulkSlot is workSlot for zip streams and copies.
+func (s *Server) bulkSlot(r *http.Request) (func(), bool) {
+	return takeSlot(r, s.bulkGate)
+}
+
+func takeSlot(r *http.Request, gate chan struct{}) (func(), bool) {
+	select {
+	case gate <- struct{}{}:
+		return func() { <-gate }, true
+	case <-r.Context().Done():
+		return nil, false
+	}
 }
 
 // requireAuth wraps a handler so it only runs for a logged-in user.
@@ -234,31 +255,64 @@ func sessionFrom(ctx context.Context) *auth.Session {
 	return s
 }
 
-// allowLogin acquires one of the few slots for password hashing, or gives up
-// after a short wait and closes with 503.
+// allowHash acquires one of the few slots for password hashing, or gives up
+// after a short wait and closes with 503. On success the caller must release
+// the slot with <-s.hashGate.
 //
 // Every sign-in attempt is hashed, including attempts against usernames that
 // do not exist, which is what keeps unknown users and wrong passwords
 // indistinguishable in timing. That makes each attempt cost about 64 MiB of
 // memory; the per-IP throttle bounds one address, and this gate bounds the
-// whole process when many addresses arrive at once.
-func (s *Server) allowLogin(w http.ResponseWriter) bool {
+// whole process when many addresses arrive at once. Every other handler that
+// hashes takes a slot here too, so a signed-in user cannot do the same
+// damage through the password form.
+func (s *Server) allowHash(w http.ResponseWriter) bool {
 	select {
-	case s.loginGate <- struct{}{}:
+	case s.hashGate <- struct{}{}:
 		return true
 	default:
 	}
 	// Slots busy. Wait briefly so an honest burst of sign-ins queues rather
 	// than erroring, then refuse politely.
 	select {
-	case s.loginGate <- struct{}{}:
+	case s.hashGate <- struct{}{}:
 		return true
 	case <-time.After(3 * time.Second):
 		w.Header().Set("Retry-After", "2")
-		writeError(w, http.StatusServiceUnavailable, "sign-in is busy, try again shortly")
+		writeError(w, http.StatusServiceUnavailable, "the server is busy, try again shortly")
 		return false
 	}
 }
+
+// stallLimit is how long a streamed response may go without the client
+// accepting a byte before the server gives up on it. A variable only so
+// tests need not wait a minute.
+var stallLimit = 60 * time.Second
+
+// stallGuard extends the connection's write deadline before every write, so
+// a stream to a reader that stopped reading fails after stallLimit instead
+// of holding its slot forever, while a slow but moving one runs as long as
+// it needs. There is no server-wide write timeout for exactly that reason.
+type stallGuard struct {
+	w  http.ResponseWriter
+	rc *http.ResponseController
+}
+
+func newStallGuard(w http.ResponseWriter) *stallGuard {
+	return &stallGuard{w: w, rc: http.NewResponseController(w)}
+}
+
+func (g *stallGuard) Write(p []byte) (int, error) {
+	// ErrNotSupported only means the writer cannot time out; streaming
+	// still works, it just loses the guard.
+	_ = g.rc.SetWriteDeadline(time.Now().Add(stallLimit))
+	return g.w.Write(p)
+}
+
+// done clears the deadline: without a server write timeout nothing else
+// resets it, and the next request on a kept-alive connection would inherit
+// a clock it never asked for.
+func (g *stallGuard) done() { _ = g.rc.SetWriteDeadline(time.Time{}) }
 
 // secure reports whether the request arrived over TLS, so the session cookie
 // can be marked Secure. Behind a reverse proxy the answer comes from

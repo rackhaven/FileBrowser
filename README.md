@@ -371,9 +371,12 @@ the browser announces a foreign `Origin` or `Sec-Fetch-Site`.
 **Sign-in throttling**: 8 attempts per IP per 15 minutes. Failures are
 indistinguishable in wording *and* in timing (every attempt is hashed,
 including ones for usernames that do not exist), so the endpoint cannot be
-used to enumerate accounts. A process-wide gate caps how many attempts are
+used to enumerate accounts. A process-wide gate caps how many passwords are
 hashed at the same moment, bounding the memory that hashing consumes when
-attempts arrive from many addresses at once.
+attempts arrive from many addresses at once; changing a password and the
+admin paths that set one share it. Wrong current passwords on the change
+form are throttled per account, 8 per 15 minutes, so a stolen cookie is not
+a free way to guess the password behind it.
 
 **No self-service signup.** Accounts exist only if an administrator creates
 them, so a server exposed to the internet cannot be joined by a stranger.
@@ -431,10 +434,17 @@ Consequences worth knowing:
   display them.
 - A whole folder can come down as one zip: use "Download this folder as zip"
   in the menu. The archive streams with constant memory, contains only entries
-  the signed-in user may read, and skips symlinks and unfinished uploads.
+  the signed-in user may read, and skips unfinished uploads. Symlinks are
+  followed under the same rules as listings, and a folder reachable by two
+  names is archived once, so a link back up the tree cannot loop. A download
+  whose reader stops accepting bytes for a minute is cut off, so a phone that
+  lost signal does not hold the server's archive slot forever.
 - Search in the magnifier drawer runs on the server and reaches everything
   below the folder you are in, stopping at 300 results; the query box in the
   main pane still narrows the current folder as you type.
+- Image previews are refused for pictures that would take more than 256 MiB
+  to decode (about 64 megapixels of plain RGBA): the row keeps its icon, and
+  the file still opens and downloads normally.
 
 Uploads use `XMLHttpRequest` rather than `fetch`, purely because it is the only
 way to report progress.

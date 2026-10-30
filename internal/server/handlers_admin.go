@@ -54,6 +54,10 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.allowHash(w) {
+		return
+	}
+	defer func() { <-s.hashGate }()
 	pub, err := s.users.Create(req.Username, req.Password, req.Admin, grants)
 	if err != nil {
 		s.writeUserError(w, r, err)
@@ -134,6 +138,10 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.allowHash(w) {
+		return
+	}
+	defer func() { <-s.hashGate }()
 	if err := s.users.SetPassword(id, req.Password, true); err != nil {
 		s.writeUserError(w, r, err)
 		return
@@ -181,6 +189,10 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Admin = true // the first account is always an administrator
 
+	if !s.allowHash(w) {
+		return
+	}
+	defer func() { <-s.hashGate }()
 	pub, err := s.users.Create(req.Username, req.Password, true, nil)
 	if err != nil {
 		s.writeUserError(w, r, err)
