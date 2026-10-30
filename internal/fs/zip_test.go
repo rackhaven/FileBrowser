@@ -45,7 +45,7 @@ func TestZipIncludesWholeReadableTree(t *testing.T) {
 	root := mustRoot(f)
 	writeFile(t, root, "docs/more/deep.txt", "deep")
 	writeFile(t, root, ".upload-4ghost.tmp", "in flight")
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	var buf bytes.Buffer
 	if err := f.Zip(u, "/", &buf); err != nil {
@@ -103,7 +103,7 @@ func TestZipOfDeniedPathFails(t *testing.T) {
 
 func TestZipOfAFileIsNotADirectory(t *testing.T) {
 	f := newTestFS(t)
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	var buf bytes.Buffer
 	if err := f.Zip(u, "/docs/readme.txt", &buf); err != ErrNotDir {
@@ -119,7 +119,7 @@ func TestZipSkipsTempNamesAndOutsideSymlinks(t *testing.T) {
 	if err := os.Symlink("/etc/hostname", filepath.Join(root, "escape")); err != nil {
 		t.Skipf("make symlink: %v", err)
 	}
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	var buf bytes.Buffer
 	if err := f.Zip(u, "/", &buf); err != nil {
@@ -141,7 +141,7 @@ func TestZipSkipsTempNamesAndOutsideSymlinks(t *testing.T) {
 
 func TestZipUsesTopFolderName(t *testing.T) {
 	f := newTestFS(t)
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	var buf bytes.Buffer
 	if err := f.Zip(u, "/docs", &buf); err != nil {
@@ -156,7 +156,7 @@ func TestZipUsesTopFolderName(t *testing.T) {
 
 func TestZipInfoNamesTheArchive(t *testing.T) {
 	f := newTestFS(t)
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	if got, err := f.ZipInfo(u, "/docs"); err != nil || got != "docs" {
 		t.Errorf("ZipInfo /docs = %q, %v; want docs, nil", got, err)

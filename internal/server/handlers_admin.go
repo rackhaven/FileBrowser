@@ -243,6 +243,9 @@ func validateGrants(in []auth.Grant) ([]auth.Grant, error) {
 				return nil, errors.New("grant paths must not contain ..")
 			}
 		}
+		if g.Level == auth.AccessAdmin {
+			return nil, auth.ErrAdminGrant
+		}
 		if g.Level == auth.AccessNone {
 			continue
 		}

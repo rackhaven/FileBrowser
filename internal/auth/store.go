@@ -98,6 +98,7 @@ func OpenStore(path string) (*Store, error) {
 	}
 	for _, u := range s.db.Users {
 		u.Username = strings.ToLower(strings.TrimSpace(u.Username))
+		u.Grants = normaliseGrants(u.Grants)
 	}
 
 	s.noteStat()
@@ -178,6 +179,7 @@ func (s *Store) reloadIfChanged() error {
 		}
 		for _, u := range fresh.Users {
 			u.Username = strings.ToLower(strings.TrimSpace(u.Username))
+			u.Grants = normaliseGrants(u.Grants)
 		}
 		s.db.Users = fresh.Users
 	}
@@ -471,11 +473,15 @@ func (s *Store) Delete(id string) error {
 }
 
 // normaliseGrants canonicalises paths and drops empty or zero-level rules so
-// comparisons later on are apples to apples.
+// comparisons later on are apples to apples. A legacy "admin" grant becomes
+// write: it never granted more, and admin is no longer a grant level.
 func normaliseGrants(in []Grant) []Grant {
 	out := make([]Grant, 0, len(in))
 	seen := make(map[string]bool, len(in))
 	for _, g := range in {
+		if g.Level > AccessWrite {
+			g.Level = AccessWrite
+		}
 		p := normalizeVirtual(g.Path)
 		if g.Level == AccessNone || seen[p] {
 			continue

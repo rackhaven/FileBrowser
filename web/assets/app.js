@@ -1106,8 +1106,10 @@ function textToGrants(text) {
     if (idx <= 0) throw new Error(`Line “${line}” needs a path and a level.`);
     const path = line.slice(0, idx).trim();
     const level = line.slice(idx + 1).trim().toLowerCase();
-    if (!['read', 'write', 'admin'].includes(level))
-      throw new Error(`“${level}” is not a valid level. Levels: read, write, admin.`);
+    if (level === 'admin')
+      throw new Error('“admin” is not a grant level. Use write; administrators are made with the CLI (user add --admin).');
+    if (!['read', 'write'].includes(level))
+      throw new Error(`“${level}” is not a valid level. Levels: read, write.`);
     if (path[0] !== '/') throw new Error(`Grant paths must start with /.`);
     grants.push({ path, level });
   }
@@ -1214,7 +1216,7 @@ function actionButton(label, onClick) {
 async function editGrants(u) {
   const text = await promptSheet({
     title: `Access for ${u.username}`,
-    text: 'One rule per line: <path> <level>. Levels: read, write, admin.',
+    text: 'One rule per line: <path> <level>. Levels: read, write.',
     label: 'Rules',
     value: grantsToText(u.grants),
     ok: 'Save',

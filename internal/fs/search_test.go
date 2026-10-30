@@ -38,7 +38,7 @@ func TestSearchFindsDeepMatches(t *testing.T) {
 	root := mustRoot(f)
 	writeFile(t, root, "notes/meeting/READ-me.txt", "hi")
 	writeFile(t, root, "docs/private/readme-2024.txt", "x")
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	out, err := f.Search(u, "/", "read")
 	if err != nil {
@@ -105,7 +105,7 @@ func TestSearchCapsResults(t *testing.T) {
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 	out, err := f.Search(u, "/", "match")
 	if err != nil {
 		t.Fatalf("Search: %v", err)
@@ -125,7 +125,7 @@ func TestSearchSkipsTempAndOutsideSymlinks(t *testing.T) {
 	if err := os.Symlink("/etc", filepath.Join(root, "hmm")); err != nil {
 		t.Skipf("make symlink: %v", err)
 	}
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	out, err := f.Search(u, "/", "sec")
 	if err != nil {
@@ -140,7 +140,7 @@ func TestSearchSkipsTempAndOutsideSymlinks(t *testing.T) {
 
 func TestSearchEmptyQueryMeansNoWork(t *testing.T) {
 	f := newTestFS(t)
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 	out, err := f.Search(u, "/", "   ")
 	if err != nil || len(out.Entries) != 0 {
 		t.Fatalf("empty query: %v entries, err %v, want none", len(out.Entries), err)

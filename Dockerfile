@@ -1,12 +1,11 @@
 # syntax=docker/dockerfile:1
 
 # ---- build ----------------------------------------------------------------
-# One build stage, cross-compiled: the suite below runs on the builder's
-# own platform, once, and the per-platform output is only the build step.
-# TARGETARCH is what buildx sets per requested platform (amd64, arm64).
-# A plain docker build leaves it empty, and Go then falls back to the
-# builder's own architecture, which is the single-platform behaviour.
-FROM golang:1.26-alpine AS build
+# One build stage, cross-compiled. --platform=$BUILDPLATFORM keeps the stage
+# on the builder's own architecture for every requested platform, so nothing
+# runs under emulation; only the final go build differs per platform. Without
+# it, buildx ran the whole stage, tests included, under QEMU for arm64.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine3.24 AS build
 
 WORKDIR /src
 
@@ -16,21 +15,26 @@ RUN go mod download
 
 COPY . .
 
+# Run the tests against the same toolchain before shipping. This step comes
+# before TARGETARCH is declared, deliberately: nothing above it differs per
+# platform, so buildx runs it once, natively, and every platform shares the
+# result.
+RUN go vet ./... && go test ./...
+
+# TARGETARCH is what buildx sets per requested platform (amd64, arm64). It
+# must be declared inside the stage to be visible here. A plain docker build
+# leaves it empty, and Go then builds for the builder's own architecture.
 # CGO off produces a static binary that runs on any Linux, including a Pi.
 # -trimpath keeps build paths out of the binary; the version is injected.
+ARG TARGETARCH
 ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" go build \
       -trimpath \
       -ldflags "-s -w -X main.version=${VERSION}" \
       -o /out/filebrowser ./cmd/filebrowser
 
-# Run the tests against the same toolchain before shipping. This step has
-# no TARGETARCH in it, deliberately: the test binaries always run on the
-# builder natively and their result is shared by both platforms.
-RUN go vet ./... && go test ./...
-
 # ---- runtime --------------------------------------------------------------
-FROM alpine:3.20
+FROM alpine:3.24
 
 # ca-certificates is needed so the server can reach a Let's Encrypt renewal
 # endpoint when TLS is terminated here rather than at a proxy.

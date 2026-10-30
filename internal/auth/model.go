@@ -16,6 +16,7 @@
 package auth
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -31,10 +32,16 @@ const (
 	AccessRead
 	// AccessWrite allows AccessRead plus upload, rename and delete.
 	AccessWrite
-	// AccessAdmin allows everything AccessWrite does, plus changing the ACL
-	// of subfolders.
+	// AccessAdmin is the level an administrator account holds everywhere.
+	// It is not a grant level: grants give read or write, and administration
+	// comes only from the account's admin flag. Older databases may still
+	// carry "admin" grants; they load as AccessWrite, which is all they ever
+	// granted.
 	AccessAdmin
 )
+
+// ErrAdminGrant refuses "admin" as a grant level in new input.
+var ErrAdminGrant = errors.New(`auth: "admin" is not a grant level; grant write, or make the account an administrator`)
 
 var levelNames = map[AccessLevel]string{
 	AccessNone:  "none",
@@ -53,8 +60,16 @@ func (l AccessLevel) String() string {
 // MarshalText lets AccessLevel round-trip through JSON as a readable string.
 func (l AccessLevel) MarshalText() ([]byte, error) { return []byte(l.String()), nil }
 
-// UnmarshalText parses the string form produced by MarshalText.
+// UnmarshalText parses the string form produced by MarshalText. Unlike
+// ParseLevel it still reads "admin", which stored databases and an
+// administrator's listing rows carry; input paths that take grants refuse
+// it themselves (see validateGrants and ErrAdminGrant), and stored grants
+// are migrated on load by normaliseGrants.
 func (l *AccessLevel) UnmarshalText(b []byte) error {
+	if s := string(b); s == "admin" || s == "a" {
+		*l = AccessAdmin
+		return nil
+	}
 	parsed, err := ParseLevel(string(b))
 	if err != nil {
 		return err
@@ -63,7 +78,8 @@ func (l *AccessLevel) UnmarshalText(b []byte) error {
 	return nil
 }
 
-// ParseLevel converts user input into an AccessLevel.
+// ParseLevel converts user input for a grant into an AccessLevel. "admin"
+// is refused with ErrAdminGrant: it is not a grant level.
 func ParseLevel(s string) (AccessLevel, error) {
 	switch s {
 	case "", "none":
@@ -73,7 +89,7 @@ func ParseLevel(s string) (AccessLevel, error) {
 	case "write", "w":
 		return AccessWrite, nil
 	case "admin", "a":
-		return AccessAdmin, nil
+		return AccessNone, ErrAdminGrant
 	}
 	return AccessNone, fmt.Errorf("auth: unknown access level %q", s)
 }

@@ -99,7 +99,7 @@ Serve flags:
 User flags (place them before the username):
   -admin           make the account an administrator with access to everything
   -grant string    access rules, e.g. -grant /photos:read,/docs:write
-                   levels: read, write, admin
+                   levels: read, write (use -admin for an administrator)
 
 Passwords are always prompted for; they are never accepted as arguments,
 because command lines are visible to other processes and shell history.
