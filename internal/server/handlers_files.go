@@ -42,6 +42,8 @@ func (s *Server) writeFSError(w http.ResponseWriter, r *http.Request, err error)
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, fs.ErrNotDir):
 		writeError(w, http.StatusBadRequest, "expected a file")
+	case errors.Is(err, fs.ErrMountPoint):
+		writeError(w, http.StatusConflict, "that folder is a mounted disk; delete or move what is inside it instead")
 	case errors.Is(err, fs.ErrNotImage):
 		writeError(w, http.StatusUnsupportedMediaType, "that file is not an image the server can preview")
 	case errors.Is(err, os.ErrNotExist):

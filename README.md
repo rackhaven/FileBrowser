@@ -174,12 +174,17 @@ everything the item held, so a folder an administrator deleted with a
 read-only rule inside it can be restored by its writers but only erased by
 an administrator. Rescue a whole subtree later: restoring recreates any
 folders that went with it. Erasing every item at once is an
-administrator action, and nothing in the trash survives being erased. The
-trash lives at the top of the root, and deleting from a disk mounted inside
-the root still works: the item is copied into the trash in full, then
-removed. That is slower than the usual instant move and needs room on the
-root's own disk, and an item holding something that cannot be copied (a
-fifo or device node) is refused whole rather than moved in part.
+administrator action, and nothing in the trash survives being erased. Each
+disk mounted inside the root keeps its own `.trash` at the top of the
+mount, so deleting there is the same instant move as anywhere else and
+needs no room on the root's disk. The drawer lists every disk's trash
+together; while a disk is unplugged its items drop out of the list, and they
+come back when it returns. A folder that *is* a mounted disk cannot itself
+be deleted or moved (delete what is inside it instead). Where mounts cannot
+be told apart (Windows), deletes on other volumes are copied into the
+root's trash in full and then removed, and an item holding something that
+cannot be copied (a fifo or device node) is refused whole rather than moved
+in part.
 
 **Deleted items age out.** By default entries leave the trash after 30 days
 (`trash_ttl`), erasing item and record quietly in the background, once a day.
