@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rackhaven/filebrowser/internal/auth"
@@ -71,6 +72,8 @@ type FS struct {
 	// thumbCache is the directory generated previews are stored in, or ""
 	// when no cache is configured ( Thumbnail still works, just slower).
 	thumbCache string
+	// trashMu serialises updates to the registry of mount trashes.
+	trashMu sync.Mutex
 }
 
 // New creates an FS rooted at dir. The directory is created if missing.

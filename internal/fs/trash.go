@@ -106,10 +106,13 @@ func (f *FS) moveToTrash(u *auth.User, real, vp string) error {
 	if err != nil {
 		return err
 	}
-	trash, err := f.trashDir()
+	// The trash on the entry's own mount, so the move below is a rename
+	// rather than a copy of everything onto the root's disk.
+	loc, err := f.trashFor(real)
 	if err != nil {
 		return err
 	}
+	trash := loc.dir
 
 	var lastErr error
 	for attempt := 0; attempt < 4; attempt++ {
@@ -164,45 +167,45 @@ func (f *FS) TrashList(u *auth.User) ([]TrashEntry, error) {
 	if u == nil || u.Disabled {
 		return nil, ErrForbidden
 	}
-	trash, err := f.trashDir()
-	if err != nil {
-		return nil, err
-	}
-	des, err := os.ReadDir(trash)
-	if err != nil {
-		return nil, err
-	}
-
 	admin := u.Admin
-	out := make([]TrashEntry, 0, len(des)/2)
-	for _, de := range des {
-		name := de.Name()
-		if name != "" && name[0] == '.' {
-			continue // sidecar records never surface as items
+	out := make([]TrashEntry, 0, 16)
+	for _, loc := range f.trashDirs() {
+		des, err := os.ReadDir(loc.dir)
+		if err != nil {
+			if loc.top == "/" {
+				return nil, err
+			}
+			continue // a disk that went away mid-read contributes nothing
 		}
-		id := trashIDOf(name)
-		if id == "" {
-			continue // an item with no recoverable record is a parking lot
+		for _, de := range des {
+			name := de.Name()
+			if name != "" && name[0] == '.' {
+				continue // records and the registry never surface as items
+			}
+			id := trashIDOf(name)
+			if id == "" {
+				continue // an item with no recoverable record is a parking lot
+			}
+			meta, ok := f.readTrashMeta(loc.dir, id)
+			if !ok {
+				continue
+			}
+			entry, ok := trashEntryFor(de, loc, name, meta)
+			if !ok {
+				continue
+			}
+			entry.CanRestore = admin || canRestore(u, meta.OriginalPath)
+			entry.CanErase = admin || canErase(u, meta.OriginalPath)
+			if !admin && !entry.CanRestore {
+				continue
+			}
+			out = append(out, entry)
 		}
-		meta, ok := f.readTrashMeta(trash, id)
-		if !ok {
-			continue
-		}
-		entry, ok := trashEntryFor(de, trash, name, meta)
-		if !ok {
-			continue
-		}
-		entry.CanRestore = admin || canRestore(u, meta.OriginalPath)
-		entry.CanErase = admin || canErase(u, meta.OriginalPath)
-		if !admin && !entry.CanRestore {
-			continue
-		}
-		out = append(out, entry)
 	}
 	return out, nil
 }
 
-func trashEntryFor(de os.DirEntry, trash, name string, meta TrashMeta) (TrashEntry, bool) {
+func trashEntryFor(de os.DirEntry, loc trashLoc, name string, meta TrashMeta) (TrashEntry, bool) {
 	info, err := de.Info()
 	if err != nil {
 		return TrashEntry{}, false
@@ -210,7 +213,7 @@ func trashEntryFor(de os.DirEntry, trash, name string, meta TrashMeta) (TrashEnt
 	return TrashEntry{
 		Name:         name,
 		OriginalPath: meta.OriginalPath,
-		TrashPath:    Clean("/" + trashDirName + "/" + name),
+		TrashPath:    trashPathOf(loc, name),
 		IsDir:        info.IsDir(),
 		Size:         info.Size(),
 		DeletedAt:    meta.DeletedAt,
@@ -275,18 +278,15 @@ func (f *FS) RestoreTrash(u *auth.User, itemName string) error {
 	if u == nil || u.Disabled {
 		return ErrForbidden
 	}
-	trash, err := f.trashDir()
-	if err != nil {
-		return err
-	}
 	item := SafeTrashName(itemName)
 	if item == "" {
 		return ErrNotExist
 	}
-	meta, ok := f.readTrashMeta(trash, trashIDOf(item))
+	loc, meta, ok := f.findTrashItem(item)
 	if !ok || meta.ID == "" {
 		return ErrNotExist
 	}
+	trash := loc.dir
 	if !u.Admin && !canRestore(u, meta.OriginalPath) {
 		return ErrForbidden
 	}
@@ -354,18 +354,15 @@ func (f *FS) TrashDelete(u *auth.User, itemName string) error {
 	if u == nil || u.Disabled {
 		return ErrForbidden
 	}
-	trash, err := f.trashDir()
-	if err != nil {
-		return err
-	}
 	item := SafeTrashName(itemName)
 	if item == "" {
 		return ErrNotExist
 	}
-	meta, ok := f.readTrashMeta(trash, trashIDOf(item))
+	loc, meta, ok := f.findTrashItem(item)
 	if !ok {
 		return ErrNotExist
 	}
+	trash := loc.dir
 	if !u.Admin && !canErase(u, meta.OriginalPath) {
 		return ErrForbidden
 	}
@@ -378,20 +375,43 @@ func (f *FS) TrashDelete(u *auth.User, itemName string) error {
 	return nil
 }
 
-// TrashPurge wipes the whole trash directory. Admins only: it is the one
-// trash operation you cannot take back.
+// TrashPurge wipes every trash, the root's and each mounted disk's. Admins
+// only: it is the one trash operation you cannot take back. The registry of
+// mount trashes survives, so a disk's trash is still found once it fills
+// again.
 func (f *FS) TrashPurge(u *auth.User) error {
 	if u == nil || !u.Admin {
 		return ErrForbidden
 	}
-	trash, err := f.trashDir()
-	if err != nil {
-		return err
+	var firstErr error
+	for _, loc := range f.trashDirs() {
+		if loc.top != "/" {
+			if err := os.RemoveAll(loc.dir); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		des, err := os.ReadDir(loc.dir)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		for _, de := range des {
+			if de.Name() == trashRegistry {
+				continue
+			}
+			if err := os.RemoveAll(filepath.Join(loc.dir, de.Name())); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
 	}
-	if err := os.RemoveAll(trash); err != nil {
-		return err
+	if firstErr != nil {
+		return firstErr
 	}
-	return os.MkdirAll(trash, 0o700)
+	_, err := f.trashDir()
+	return err
 }
 
 // SafeTrashName keeps a client-supplied trash item name to a plain file
@@ -420,16 +440,29 @@ func (f *FS) TrashSweep(maxAge time.Duration) (int, error) {
 	if maxAge <= 0 {
 		return 0, nil
 	}
-	trash := filepath.Join(f.root, trashDirName)
+	cutoff := time.Now().UTC().Add(-maxAge)
+	removed := 0
+	var firstErr error
+	for _, loc := range f.trashDirs() {
+		n, err := f.sweepTrash(loc.dir, cutoff)
+		removed += n
+		if err != nil && firstErr == nil {
+			firstErr = err // keep going: one stuck disk must not stall the rest
+		}
+	}
+	return removed, firstErr
+}
+
+// sweepTrash erases the entries of one trash deleted before cutoff.
+func (f *FS) sweepTrash(trash string, cutoff time.Time) (int, error) {
 	des, err := os.ReadDir(trash)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return 0, nil // no trash yet: nothing to retain
+			return 0, nil // gone since it was listed: nothing to retain
 		}
 		return 0, err
 	}
 
-	cutoff := time.Now().UTC().Add(-maxAge)
 	type old struct{ item, record string }
 	var doomed []old
 	for _, de := range des {

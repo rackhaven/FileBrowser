@@ -146,6 +146,9 @@ func (f *FS) Remove(u *auth.User, vpath string) error {
 	if !subtreeWritable(u, vp, realVP) {
 		return ErrForbidden
 	}
+	if f.isMountPoint(real) {
+		return ErrMountPoint
+	}
 	return f.moveToTrash(u, real, vp)
 }
 
@@ -173,6 +176,9 @@ func (f *FS) Rename(u *auth.User, from, toDir, newName string, overwrite bool) (
 	}
 	if !subtreeWritable(u, fromVP, srcRealVP) {
 		return Entry{}, ErrForbidden
+	}
+	if f.isMountPoint(src) {
+		return Entry{}, ErrMountPoint
 	}
 
 	dstVP, err := Join(toDir, newName)
