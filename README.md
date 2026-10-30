@@ -170,7 +170,12 @@ everything the item held, so a folder an administrator deleted with a
 read-only rule inside it can be restored by its writers but only erased by
 an administrator. Rescue a whole subtree later: restoring recreates any
 folders that went with it. Erasing every item at once is an
-administrator action, and nothing in the trash survives being erased.
+administrator action, and nothing in the trash survives being erased. The
+trash lives at the top of the root, and deleting from a disk mounted inside
+the root still works: the item is copied into the trash in full, then
+removed. That is slower than the usual instant move and needs room on the
+root's own disk, and an item holding something that cannot be copied (a
+fifo or device node) is refused whole rather than moved in part.
 
 **Deleted items age out.** By default entries leave the trash after 30 days
 (`trash_ttl`), erasing item and record quietly in the background, once a day.
@@ -403,13 +408,18 @@ except loopback.
 - **There is no second factor.** If you want it, put the service behind a VPN,
   or add an identity-aware proxy in front.
 - **Rate limiting is per process and per IP.** A restart clears it. It is there
-  to blunt guessing, not to be a hard control. When `trust_proxy_headers` is
+  to blunt guessing, not to be a hard control. IPv6 clients are limited per
+  /64, since one subscriber is routinely handed a whole /64 and could
+  otherwise rotate through it for fresh attempts. When `trust_proxy_headers` is
   set, the address that is limited and logged comes from `X-Forwarded-For`,
   which is why the flag should only be on behind a proxy that overwrites that
   header with the client's address rather than appending to it (the sample
   Caddyfile does exactly that).
 - **Uploads land in a temporary file and are renamed into place**, so an
-  interrupted upload never leaves a truncated file that looks complete.
+  interrupted upload never leaves a truncated file that looks complete. The
+  rename claims the name atomically (on Linux), so a file that appears while
+  an upload is still streaming is never replaced by it; the late upload
+  answers 409 instead. Moves and restores are no-replace the same way.
 - **Copies behave the same way**, and a copy is a create, not a replace: an
   app already sitting at the destination refuses to be overwritten. Folder
   copies walk the tree while links and reserved names behave exactly as in a

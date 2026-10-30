@@ -267,7 +267,8 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	name := q.Get("name")
 
-	target, vpath, err := s.files.UploadTarget(u, q.Get("path"), name, q.Get("overwrite") != "")
+	overwrite := q.Get("overwrite") != ""
+	target, vpath, err := s.files.UploadTarget(u, q.Get("path"), name, overwrite)
 	if err != nil {
 		s.writeFSError(w, r, err)
 		return
@@ -305,18 +306,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if err := os.Chmod(tmpName, 0o644); err != nil {
 		s.logError("chmod upload", "err", err)
 	}
-	if err := os.Rename(tmpName, target); err != nil {
-		if errors.Is(err, os.ErrExist) {
-			// Rename will not clobber on Windows; remove first so replacing a
-			// file works the same on every platform.
-			if rerr := os.Remove(target); rerr == nil {
-				err = os.Rename(tmpName, target)
-			}
-		}
-		if err != nil {
-			s.writeFSError(w, r, err)
-			return
-		}
+	if err := fs.PlaceUpload(tmpName, target, overwrite); err != nil {
+		s.writeFSError(w, r, err)
+		return
 	}
 
 	s.logf("upload", "user", u.Username, "file", name, "bytes", written)

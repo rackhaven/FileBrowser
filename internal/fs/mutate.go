@@ -202,9 +202,15 @@ func (f *FS) Rename(u *auth.User, from, toDir, newName string, overwrite bool) (
 		return Entry{}, err
 	}
 
-	if err := os.Rename(src, target); err != nil {
+	// The check above answers the common case with a clear error; the
+	// move itself re-asserts it, since an entry can appear in between.
+	move := moveNoClobber
+	if overwrite {
+		move = moveReplacing
+	}
+	if err := move(src, target); err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return Entry{}, fmt.Errorf("fs: %s already exists", newName)
+			return Entry{}, fmt.Errorf("fs: %s already exists: %w", newName, os.ErrExist)
 		}
 		return Entry{}, err
 	}
@@ -370,8 +376,8 @@ func (f *FS) Copy(u *auth.User, from, toDir, name string) (Entry, error) {
 		return Entry{}, ErrForbidden
 	}
 	// A copy is a create, not a replace: an existing destination is refused
-	// rather than overwritten. (A directory rename that lands on a non-empty
-	// target fails in the kernel itself, so this window stays narrow.)
+	// rather than overwritten. This early check saves copying a tree only to
+	// be refused; the final no-replace rename is what actually guarantees it.
 	if _, lerr := os.Lstat(dst); lerr == nil {
 		return Entry{}, os.ErrExist
 	}
@@ -391,7 +397,7 @@ func (f *FS) Copy(u *auth.User, from, toDir, name string) (Entry, error) {
 			os.RemoveAll(tmp)
 			return Entry{}, err
 		}
-		if err := os.Rename(tmp, dst); err != nil {
+		if err := rename(tmp, dst); err != nil {
 			os.RemoveAll(tmp)
 			return Entry{}, err
 		}
@@ -411,7 +417,7 @@ func (f *FS) Copy(u *auth.User, from, toDir, name string) (Entry, error) {
 			os.Remove(tmpName)
 			return Entry{}, err
 		}
-		if err := os.Rename(tmpName, dst); err != nil {
+		if err := rename(tmpName, dst); err != nil {
 			os.Remove(tmpName)
 			return Entry{}, err
 		}

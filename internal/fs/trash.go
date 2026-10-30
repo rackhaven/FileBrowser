@@ -93,15 +93,14 @@ func (f *FS) trashDir() (string, error) {
 // user is entitled to delete. It moves the entry into the trash and writes
 // the sidecar record that remembers where it came from.
 //
-// Two different moves are used, because neither claim is correct for both:
-//   - files: a hard link claims the trash name atomically (link refuses to
-//     replace, which detects an id collision), then the original is unlinked.
-//   - folders: rename is the only option, and rename of a dir onto an
-//     existing name fails except when that name is an empty directory. An
-//     id collision is recovered by drawing a fresh id; a drained empty dir
-//     could in principle be replaced, which is harmless (it held nothing).
+// The move is moveNoClobber: a rename that never replaces (an id collision
+// answers os.ErrExist and a fresh id is drawn), falling back to copy and
+// remove when the entry lives on another filesystem than the trash, as a
+// disk mounted inside the root does. Earlier versions claimed the trash name
+// with a hard link, which FAT and exFAT drives, some network shares and
+// fs.protected_hardlinks all refuse, so deletes failed there outright.
 //
-// Symlinks move as themselves both ways: the trash never follows them.
+// Symlinks move as themselves: the trash never follows them.
 func (f *FS) moveToTrash(u *auth.User, real, vp string) error {
 	info, err := os.Lstat(real)
 	if err != nil {
@@ -138,28 +137,21 @@ func (f *FS) moveToTrash(u *auth.User, real, vp string) error {
 			return fmt.Errorf("fs: trash record: %w", err)
 		}
 
-		if info.IsDir() {
-			lastErr = os.Rename(real, itemPath)
-		} else {
-			lastErr = os.Link(real, itemPath)
-		}
-		if lastErr != nil {
+		lastErr = moveNoClobber(real, itemPath)
+		switch {
+		case lastErr == nil:
+			return nil
+		case errors.Is(lastErr, errMoveLeftovers):
+			// The trash holds a complete copy; keep it and its record,
+			// and say the delete did not fully finish.
+			return lastErr
+		case errors.Is(lastErr, os.ErrExist):
 			_ = os.Remove(metaPath)
-			continue // a collision or a hiccup: fresh id, try again
+			continue // an id collision: fresh id, try again
+		default:
+			_ = os.Remove(metaPath)
+			return lastErr
 		}
-		if !info.IsDir() {
-			// The link already copied the content safely under a protected
-			// name; unlinking the original completes the move.
-			if rerr := os.Remove(real); rerr != nil {
-				// Keep both copies rather than lose data, and surface the
-				// failure so the caller knows the delete did not actually
-				// finish.
-				_ = os.Remove(itemPath)
-				_ = os.Remove(metaPath)
-				return rerr
-			}
-		}
-		return nil
 	}
 	return lastErr
 }
@@ -304,33 +296,15 @@ func (f *FS) RestoreTrash(u *auth.User, itemName string) error {
 		return err
 	}
 	itemPath := filepath.Join(trash, item)
-	// Each kind moves by the primitive that cannot clobber. Files and
-	// symlinks: a hard link claims the destination only when the name is
-	// free, then the trash copy is unlinked. Directories cannot be linked,
-	// so they rename; rename would replace an empty directory, so an
-	// occupancy check runs first and anything present at the destination is
-	// an error the caller sees (restore never overwrites).
-	info, err := os.Lstat(itemPath)
-	if err != nil {
+	// Restore never overwrites: anything present at the destination is an
+	// error the caller sees. Across filesystems the move copies, and when
+	// the trash copy cannot be fully removed afterwards its record is kept,
+	// so the leftover stays visible to whoever can erase it.
+	if err := moveNoClobber(itemPath, dst); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return os.ErrExist // the bare sentinel, as callers have always had
+		}
 		return err
-	}
-	if info.IsDir() {
-		if _, serr := os.Lstat(dst); serr == nil {
-			return os.ErrExist
-		}
-		if err := os.Rename(itemPath, dst); err != nil {
-			return err
-		}
-	} else {
-		if lerr := os.Link(itemPath, dst); lerr != nil {
-			if errors.Is(lerr, os.ErrExist) {
-				return os.ErrExist
-			}
-			return lerr
-		}
-		if err := os.Remove(itemPath); err != nil {
-			return err
-		}
 	}
 	_ = os.Remove(filepath.Join(trash, "."+meta.ID+".json"))
 	return nil
