@@ -77,7 +77,7 @@ func TestThumbnailScalesLargeImages(t *testing.T) {
 		t.Fatalf("SetThumbCache: %v", err)
 	}
 	makeJPEG(t, root, "photos/big.jpg", 800, 600)
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	thumb, err := f.Thumbnail(u, "/photos/big.jpg")
 	if err != nil {
@@ -104,7 +104,7 @@ func TestThumbnailPassesSmallImagesThrough(t *testing.T) {
 	}
 	writeFile(t, root, "photos/tiny.png", string(tinyPNG))
 	writeFile(t, root, "photos/tiny.gif", string(tinyGIF))
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	// This passage-through is also the regression test for the decoder
 	// registrations: without all of them the decode fails and the two calls
@@ -139,7 +139,7 @@ func TestThumbnailUsesAndRefreshesItsCache(t *testing.T) {
 	if err := f.SetThumbCache(cache); err != nil {
 		t.Fatalf("SetThumbCache: %v", err)
 	}
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	makeJPEG(t, root, "photos/one.jpg", 900, 700)
 	if _, err := f.Thumbnail(u, "/photos/one.jpg"); err != nil {
@@ -182,7 +182,7 @@ func TestThumbnailRejectsNonImages(t *testing.T) {
 	writeFile(t, root, "docs/note.txt", "just text")
 	// And a file whose extension lies about its contents.
 	writeFile(t, root, "photos/liar.png", "<html>this is not an image</html>")
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	if _, err := f.Thumbnail(u, "/docs/note.txt"); !errors.Is(err, ErrNotImage) {
 		t.Errorf("txt: %v, want ErrNotImage", err)
@@ -210,7 +210,7 @@ func TestThumbnailAccessChecks(t *testing.T) {
 	if _, err := f.Thumbnail(denied, "/photos/secret.jpg"); !errors.Is(err, ErrForbidden) {
 		t.Errorf("denied: %v, want ErrForbidden", err)
 	}
-	if _, err := f.Thumbnail(user(auth.AccessAdmin), "/photos/nope.png"); !errors.Is(err, os.ErrNotExist) {
+	if _, err := f.Thumbnail(user(auth.AccessWrite), "/photos/nope.png"); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("missing: %v, want os.ErrNotExist", err)
 	}
 }
@@ -219,7 +219,7 @@ func TestThumbnailWorksWithoutCache(t *testing.T) {
 	f := newTestFS(t)
 	root := mustRoot(f)
 	makeJPEG(t, root, "photos/ok.jpg", 500, 400)
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	thumb, err := f.Thumbnail(u, "/photos/ok.jpg")
 	if err != nil {

@@ -29,8 +29,8 @@ import (
 )
 
 // adminUser is a real server admin (the boolean, as the login flow sets it).
-// The grant helpers below cannot express this: a grant with an AccessAdmin
-// level is path administration, not the session-wide admin flag.
+// The grant helpers below cannot express this: grants give read or write,
+// and administration comes only from the account's admin flag.
 func adminUser() *auth.User {
 	return &auth.User{Username: "admin", Admin: true}
 }

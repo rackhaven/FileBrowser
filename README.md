@@ -4,13 +4,13 @@ A private file browser for your own machine. One Go binary, one web app that
 installs on iOS and Android like a native app, per-user folder permissions, and
 no cloud service in the middle.
 
-- **Browse and download from your phone** — install it to the home screen and it
+- **Browse and download from your phone**: install it to the home screen and it
   behaves like a normal app, with the system "Save to Files" sheet on iOS.
-- **Multiple people, different folders** — each account sees only what you grant
+- **Multiple people, different folders**: each account sees only what you grant
   them, and never learns the names of folders they cannot open.
-- **Reaches you over HTTPS** — a domain with automatic certificates, or a
+- **Reaches you over HTTPS**: a domain with automatic certificates, or a
   Tailscale/WireGuard VPN so nothing is exposed to the internet at all.
-- **Reads nothing outside one directory** — enforced for every request,
+- **Reads nothing outside one directory**: enforced for every request,
   including administrators, including symlinks.
 
 ```
@@ -138,7 +138,11 @@ Access is a list of rules per user. Each rule is a folder and a level:
 | ------- | --------------------------------------------------- |
 | `read`  | list folders, download files                         |
 | `write` | all of `read`, plus upload, rename, copy, delete     |
-| `admin` | all of `write`, plus administer that subtree         |
+
+Earlier versions also offered an `admin` level for grants. It never granted
+more than `write`, so databases that still carry one load it as `write` and
+save it that way; new rules are refused with a pointer to the account's
+administrator flag instead.
 
 A rule applies to the folder **and everything under it**. The most specific
 rule wins, so this is exactly what you would expect:
@@ -250,7 +254,7 @@ sudo wg-quick up wg0     # on the server
 ```
 
 Then browse the server's tunnel address (e.g. `https://10.0.0.1:8080`). Because
-the tunnel is already encrypted, plain HTTP on the tunnel is acceptable — but
+the tunnel is already encrypted, plain HTTP on the tunnel is acceptable, but
 browsers will warn about the self-signed certificate, so prefer `tailscale
 serve` if you want a certificate the browser trusts.
 
@@ -325,13 +329,13 @@ file.
 | `-listen`       | `FB_LISTEN`            | `0.0.0.0:8080` | bind address                        |
 | `-root`         | `FB_ROOT`              | `/srv/files`   | the one directory that is exposed   |
 | `-data`         | `FB_DATA_DIR`          | `/data`        | holds `users.json` and `sessions.json` |
-| `-config`       | —                      | —              | YAML config file                    |
+| `-config`       |                        | none           | YAML config file                    |
 |                | `FB_SESSION_TTL`       | `168h`         | how long a sign-in lasts            |
 |                | `FB_TRASH_TTL`         | `720h`         | deleted items leave the trash after this; `0s` keeps them |
 |                | `FB_TRUST_PROXY_HEADERS` | `false`      | honour `X-Forwarded-Proto` and `X-Forwarded-For` |
 |                | `FB_MAX_UPLOAD_BYTES`  | `34359738368`  | largest upload, in bytes            |
 |                | `FB_THUMB_CACHE`       | `<data>/thumbs` | where generated image previews live; follows `-data` unless set |
-|                | `FB_TLS_CERT`/`FB_TLS_KEY` | —         | terminate TLS here instead          |
+|                | `FB_TLS_CERT`/`FB_TLS_KEY` | none      | terminate TLS here instead          |
 |                | `FB_LOG_LEVEL`         | `info`         | `debug`, `info`, `warn`, `error`    |
 |                | `FB_ADMIN_USER`        | `admin`        | first-run account name              |
 |                | `FB_ADMIN_PASSWORD`    | generated      | first-run password                  |
@@ -434,7 +438,7 @@ except loopback.
 
 Tapping a file hands it to the browser with a plain anchor. That is deliberate.
 
-The obvious alternative — `fetch` the bytes in JavaScript and save a blob —
+The obvious alternative, `fetch` the bytes in JavaScript and save a blob,
 would have to hold the whole file in memory, so a 4 GB video fails, and on iOS
 it offers no "Save to Files" sheet at all. Letting the browser stream it is both
 lighter and is what produces the native picker.
@@ -494,11 +498,11 @@ roughly the same two minutes produce both.
 
 The suite leans on the filesystem rules, because that is where the risk is:
 
-- `internal/fs/fs_test.go` — traversal, symlink escape, ACL resolution,
+- `internal/fs/fs_test.go`: traversal, symlink escape, ACL resolution,
   listing visibility, symlink listing
-- `internal/auth/auth_test.go` — hashing, the store, last-admin protection,
+- `internal/auth/auth_test.go`: hashing, the store, last-admin protection,
   concurrency
-- `internal/server/server_test.go` — the HTTP surface end to end: auth
+- `internal/server/server_test.go`: the HTTP surface end to end: auth
   enforcement, per-user grants, range requests, upload, admin APIs
 
 Some of those cases only exercise symlinks on Linux, so **the container build
@@ -524,7 +528,8 @@ internal/auth/       argon2id hashing, user database, server-side sessions
 internal/fs/         ACL enforcement and symlink-safe path resolution
 internal/server/     HTTP handlers, middleware, routing
 web/assets/          the PWA (html, css, js, service worker, icons)
-deploy/              Dockerfile, compose, systemd unit, Caddyfile, config sample
+Dockerfile           container build; the test suite runs inside it
+deploy/              compose, systemd unit, Caddyfile, config sample
 tools/               icon generator, PWA wiring checks, screenshots
 ```
 
@@ -568,7 +573,7 @@ noted.
 | `DELETE` | `/api/fs/trash?name=` | erase one trashed entry; with no `name`, admin-only wipe of the whole trash |
 | `GET` | `/api/fs/usage?path=/&depth=8` | `{files, dirs, bytes}` |
 
-**Admin** — all require an administrator.
+**Admin**: all require an administrator.
 
 | Method | Path | |
 | --- | --- | --- |
@@ -578,13 +583,14 @@ noted.
 | `DELETE` | `/api/admin/users/{id}` | remove |
 | `POST` | `/api/admin/users/{id}/password` | `{password}`; forces a change |
 
-A grant is `{path, level}` where `level` is `read`, `write` or `admin`.
+A grant is `{path, level}` where `level` is `read` or `write`. Administration
+is not a grant level: it is the account's `admin` flag.
 
 ---
 
 ## Licence
 
-**GNU Affero General Public License v3.0 or later** — see [`LICENSE`](LICENSE).
+**GNU Affero General Public License v3.0 or later**. See [`LICENSE`](LICENSE).
 
 AGPL rather than GPL because this is a network server. If you run a modified
 version and let other people reach it over a network, you must offer them the

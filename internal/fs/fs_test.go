@@ -78,7 +78,7 @@ func user(level auth.AccessLevel, grants ...auth.Grant) *auth.User {
 // never the real /etc. The invariant under test is containment, not refusal.
 func TestResolveRejectsTraversal(t *testing.T) {
 	f := newTestFS(t)
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	cases := []string{
 		"../",
@@ -115,7 +115,7 @@ func TestResolveRejectsTraversal(t *testing.T) {
 // lands on the root rather than escaping.
 func TestResolveClampsAboveRoot(t *testing.T) {
 	f := newTestFS(t)
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	for _, p := range []string{"..", "/..", "/../..", "../../../../.."} {
 		got, err := f.Resolve(u, p, auth.AccessRead)
@@ -136,7 +136,7 @@ func TestResolveRejectsSymlinkEscape(t *testing.T) {
 	}
 
 	f := newTestFS(t)
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	outside := t.TempDir()
 	writeFile(t, outside, "secret.txt", "must not be reachable")
@@ -173,7 +173,7 @@ func TestResolveAllowsSymlinkInsideRoot(t *testing.T) {
 	}
 
 	f := newTestFS(t)
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	// Targets of links inside the tree are written relative to the link, the
 	// form the kernel's clamped resolution can follow all the way through;
@@ -202,7 +202,7 @@ func TestEffectiveLevelPicksLongestGrant(t *testing.T) {
 	u := &auth.User{Grants: []auth.Grant{
 		{Path: "/", Level: auth.AccessRead},
 		{Path: "/photos", Level: auth.AccessWrite},
-		{Path: "/photos/2024", Level: auth.AccessAdmin},
+		{Path: "/photos/2024", Level: auth.AccessRead},
 	}}
 
 	tests := map[string]auth.AccessLevel{
@@ -210,8 +210,8 @@ func TestEffectiveLevelPicksLongestGrant(t *testing.T) {
 		"/docs":             auth.AccessRead,
 		"/photos":           auth.AccessWrite,
 		"/photos/a/b":       auth.AccessWrite,
-		"/photos/2024":      auth.AccessAdmin,
-		"/photos/2024/trip": auth.AccessAdmin,
+		"/photos/2024":      auth.AccessRead, // narrower rule wins, even downward
+		"/photos/2024/trip": auth.AccessRead,
 		// "/photos-archive" must not inherit the "/photos" write grant. It only
 		// matches the catch-all "/" read rule, so it stays read-only.
 		"/photos-archive":      auth.AccessRead,
@@ -270,7 +270,7 @@ func TestWriteRequiresWriteGrant(t *testing.T) {
 
 func TestRemoveRefusesRoot(t *testing.T) {
 	f := newTestFS(t)
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 	if err := f.Remove(u, "/"); err == nil {
 		t.Fatal("removing the root must be refused")
 	}
@@ -323,7 +323,7 @@ func TestListShowsPartialParents(t *testing.T) {
 
 func TestListSortsDirsFirst(t *testing.T) {
 	f := newTestFS(t)
-	entries, err := f.List(user(auth.AccessAdmin), "/")
+	entries, err := f.List(user(auth.AccessWrite), "/")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestRenameRequiresWriteOnBothSides(t *testing.T) {
 
 func TestInfoRejectsDirectoriesAsFiles(t *testing.T) {
 	f := newTestFS(t)
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 	if _, _, err := f.Open(u, "/docs"); err == nil {
 		t.Fatal("opening a directory as a file should fail")
 	}
@@ -447,7 +447,7 @@ func TestInfoRejectsDirectoriesAsFiles(t *testing.T) {
 
 func TestOpenStreamsContent(t *testing.T) {
 	f := newTestFS(t)
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	file, _, err := f.Open(u, "/docs/readme.txt")
 	if err != nil {
@@ -472,7 +472,7 @@ func TestOpenStreamsContent(t *testing.T) {
 // no mutation may be aimed at one.
 func TestListHidesInFlightUploads(t *testing.T) {
 	f := newTestFS(t)
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	writeFile(t, mustRoot(f), ".upload-4ghost.tmp", "in flight")
 	entries, err := f.List(u, "/")
@@ -491,7 +491,7 @@ func TestListHidesInFlightUploads(t *testing.T) {
 
 func TestTempNamesAreReserved(t *testing.T) {
 	f := newTestFS(t)
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 	writeFile(t, mustRoot(f), ".upload-refused.tmp", "x")
 
 	if _, err := f.Mkdir(u, "/", ".upload-new"); err != ErrReserved {
@@ -585,7 +585,7 @@ func TestSweepUploadTempsErasesAbandonedTemps(t *testing.T) {
 
 func TestRenameOverwriteNeedsAsking(t *testing.T) {
 	f := newTestFS(t)
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	// Landing on a name already held conflicts, typed so the API layer
 	// maps it to a status rather than a stack. Nothing else moved.
@@ -618,7 +618,7 @@ func TestRenameOverwriteNeedsAsking(t *testing.T) {
 
 func TestUploadTargetOverwriteNeedsAsking(t *testing.T) {
 	f := newTestFS(t)
-	u := user(auth.AccessAdmin)
+	u := user(auth.AccessWrite)
 
 	// An existing file is a conflict until the client says otherwise.
 	if _, _, err := f.UploadTarget(u, "/photos/2024", "a.jpg", false); !errors.Is(err, os.ErrExist) {

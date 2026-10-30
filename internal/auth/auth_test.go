@@ -833,3 +833,39 @@ func TestReadsSeeAnotherProcessesWrites(t *testing.T) {
 		t.Errorf("Count = %d, want 2", n)
 	}
 }
+
+// TestAdminIsNotAGrantLevel: new input refuses "admin" as a grant level,
+// while a database written by an older version still loads, its "admin"
+// grants read as write (all they ever granted) and saved back that way.
+func TestAdminIsNotAGrantLevel(t *testing.T) {
+	for _, in := range []string{"admin", "a"} {
+		if _, err := ParseLevel(in); !errors.Is(err, ErrAdminGrant) {
+			t.Errorf("ParseLevel(%q) = %v, want ErrAdminGrant", in, err)
+		}
+	}
+
+	path := filepath.Join(t.TempDir(), "users.json")
+	legacy := `{"version":1,"users":[{"id":"u1","username":"bob","password_hash":"x",
+		"grants":[{"path":"/photos","level":"admin"},{"path":"/docs","level":"read"}]}]}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatalf("a legacy database must still load: %v", err)
+	}
+	bob, err := s.GetByUsername("bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bob.EffectiveLevel("/photos/x"); got != AccessWrite {
+		t.Errorf("legacy admin grant reads as %v, want write", got)
+	}
+	if _, err := s.Update(bob.ID, func(*User) {}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	raw, _ := os.ReadFile(path)
+	if strings.Contains(string(raw), `"level": "admin"`) {
+		t.Errorf("an admin grant level survived the save:\n%s", raw)
+	}
+}

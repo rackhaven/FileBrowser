@@ -153,3 +153,23 @@ jobs:
 
       - name: Image size
         run: docker images filebrowser:ci --format '{{.Size}}'
+
+      # Releases publish arm64 too. The build stage cross-compiles on the
+      # runner, so a slip there (a missing ARG TARGETARCH, say) would still
+      # build cleanly and ship an amd64 binary in an arm64 image. Running the
+      # binary under emulation is what catches that before a tag does.
+      - uses: docker/setup-qemu-action@v4
+
+      - name: Build the arm64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          platforms: linux/arm64
+          tags: filebrowser:ci-arm64
+          build-args: |
+            VERSION=ci-${{ github.sha }}
+
+      - name: Run the arm64 binary
+        run: docker run --rm --platform linux/arm64 filebrowser:ci-arm64 version

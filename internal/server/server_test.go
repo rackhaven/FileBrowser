@@ -481,6 +481,30 @@ func TestAdminCanCreateUserWithGrants(t *testing.T) {
 	r.Body.Close()
 }
 
+// TestAdminGrantLevelRejected: "admin" is not a grant level; the API says so
+// rather than storing it, on create and on update alike.
+func TestAdminGrantLevelRejected(t *testing.T) {
+	h := newHarness(t)
+	client := h.login("admin", "password123")
+
+	resp := h.post(client, "/api/admin/users",
+		`{"username":"x1","password":"password123","grants":[{"path":"/photos","level":"admin"}]}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("create with an admin grant = %d, want 400", resp.StatusCode)
+	}
+
+	resp = h.post(client, "/api/admin/users",
+		`{"username":"x2","password":"password123","grants":[{"path":"/photos","level":"read"}]}`)
+	created := decode(t, resp)
+	resp = h.patch(client, "/api/admin/users/"+created["id"].(string),
+		`{"grants":[{"path":"/photos","level":"admin"}]}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("update to an admin grant = %d, want 400", resp.StatusCode)
+	}
+}
+
 func TestGrantValidationRejectsTraversal(t *testing.T) {
 	h := newHarness(t)
 	client := h.login("admin", "password123")
