@@ -49,7 +49,8 @@ func (s *Server) uptime() string {
 // endpoint cannot be used to enumerate accounts.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ip := s.clientIP(r)
-	if !s.limiter.allow(ip) {
+	throttle := rateKey(ip)
+	if !s.limiter.allow(throttle) {
 		w.Header().Set("Retry-After", "900")
 		writeError(w, http.StatusTooManyRequests, "too many sign-in attempts, try again later")
 		return
@@ -91,7 +92,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not start session")
 		return
 	}
-	s.limiter.reset(ip) // don't penalise a user who fumbled the password earlier
+	s.limiter.reset(throttle) // don't penalise a user who fumbled the password earlier
 	s.setSessionCookie(w, r, sess.Token, sess.ExpiresAt)
 
 	s.logf("login", "user", user.Username, "ip", ip)

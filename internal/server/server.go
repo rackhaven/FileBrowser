@@ -551,47 +551,71 @@ type rateLimiter struct {
 	limit  int
 	window time.Duration
 	hits   map[string][]time.Time
+	// lastPrune is when idle keys were last swept out of hits.
+	lastPrune time.Time
+	now       func() time.Time
 }
 
 func newRateLimiter(limit int, window time.Duration) *rateLimiter {
-	return &rateLimiter{limit: limit, window: window, hits: make(map[string][]time.Time)}
+	return &rateLimiter{limit: limit, window: window, hits: make(map[string][]time.Time), now: time.Now}
 }
 
-// allow reports whether an attempt from ip is within budget, and records it.
-func (rl *rateLimiter) allow(ip string) bool {
-	now := time.Now()
+// allow reports whether an attempt under key is within budget, and records
+// it. Keys are client addresses (see rateKey) or other namespaced strings.
+func (rl *rateLimiter) allow(key string) bool {
+	now := rl.now()
 	cutoff := now.Add(-rl.window)
 
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
-	kept := rl.hits[ip][:0]
-	for _, t := range rl.hits[ip] {
+	// Once per window, drop every key with nothing left inside it. Pruning
+	// only when an attempt was refused, as before, let a stream of fresh
+	// addresses that never hit the limit grow the map without end.
+	if now.Sub(rl.lastPrune) >= rl.window {
+		for k, ts := range rl.hits {
+			if len(ts) == 0 || !ts[len(ts)-1].After(cutoff) {
+				delete(rl.hits, k)
+			}
+		}
+		rl.lastPrune = now
+	}
+
+	kept := rl.hits[key][:0]
+	for _, t := range rl.hits[key] {
 		if t.After(cutoff) {
 			kept = append(kept, t)
 		}
 	}
-	rl.hits[ip] = kept
+	rl.hits[key] = kept
 
 	if len(kept) >= rl.limit {
-		// Opportunistically evict idle IPs so the map cannot grow forever.
-		if len(rl.hits) > 4096 {
-			for k, ts := range rl.hits {
-				if len(ts) == 0 || ts[len(ts)-1].Before(cutoff) {
-					delete(rl.hits, k)
-				}
-			}
-		}
 		return false
 	}
-	rl.hits[ip] = append(kept, now)
+	rl.hits[key] = append(kept, now)
 	return true
 }
 
-// reset clears an IP's counter. Called after a successful login so a legitimate
-// user is not punished for earlier typos.
-func (rl *rateLimiter) reset(ip string) {
+// reset clears a key's counter. Called after a successful login so a
+// legitimate user is not punished for earlier typos.
+func (rl *rateLimiter) reset(key string) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	delete(rl.hits, ip)
+	delete(rl.hits, key)
+}
+
+// rateKey is the limiter key for a client address. IPv6 addresses are
+// grouped by their /64: one subscriber is routinely handed a whole /64, so
+// limiting single addresses would give an attacker 2^64 fresh budgets. IPv4
+// (including IPv4-mapped IPv6) is limited per address. Anything that does
+// not parse, such as an odd X-Forwarded-For value, is used as it stands.
+func rateKey(addr string) string {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return addr
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
