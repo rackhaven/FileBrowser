@@ -92,7 +92,7 @@ jobs:
       # runs once (it targets the builder) and both platforms reuse that
       # pass; only the build step differs per platform.
       - name: Push the image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
